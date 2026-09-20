@@ -151,12 +151,13 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
     if (muted) ImGui::PopStyleColor();
     ImGui::SameLine();
     const int prog = mt32_->program(ps.channel);
-    const char* cur_patch = mt32_->patchName(part);
+    // Shadow-snapshot read (never the live synth): safe on the UI thread.
+    const std::string cur_patch = mt32_->patchName(part);
     // Timbre selector combo (128 factory timbres).
     char combo_id[32];
     std::snprintf(combo_id, sizeof(combo_id), "##mt32prog%d", part);
     ImGui::SetNextItemWidth(140.0f);
-    if (ImGui::BeginCombo(combo_id, cur_patch)) {
+    if (ImGui::BeginCombo(combo_id, cur_patch.c_str())) {
       for (int p = 0; p < 128; ++p) {
         const bool selected = (p == prog);
         if (ImGui::Selectable(programName(p), selected)) {

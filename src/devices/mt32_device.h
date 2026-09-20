@@ -23,15 +23,19 @@
 //     20-char LCD buffer (Roland display SysEx updates it, like hardware).
 //   - 16 MIDI channels track in the base; MT-32 parts 1-8 listen on
 //     0-based channels 1-8 (MIDI 2-9) and rhythm on 0-based 9 by factory
-//     default, the rest is forwarded harmlessly. Mute/solo render gating
-//     rides CC7 part volume, which the MT-32 captures at note start
-//     (measured: CC7=0 leaves a held piano at full level but drops a
-//     subsequently triggered voice ~150x — authentic hardware behavior).
-//     So the gate silences newly triggered voices while already-held
-//     voices decay naturally, and the pre-synth filter stops muted
-//     channels allocating anything new. Per-channel stem isolation uses
-//     a CC7 mute-others dance (volumes saved/restored from the base CC
-//     matrix), so each audible stem holds only its own channel's voices.
+//     default, the rest is forwarded harmlessly. Mute/solo is enforced by
+//     the pre-synth Note-On filter plus Note-Off/CC120/CC123 for held
+//     notes — NEVER by CC7: the MT-32 captures part volume at note start,
+//     so a CC7=0 write aimed at a channel that is dormant at click time
+//     silences that channel forever (nothing re-arms CC7). Per-channel
+//     stem isolation silences the other channels' held notes through the
+//     same Note-Off/CC120/CC123 path.
+//   - MUNT is driven exclusively through the thread-safe playMsg()/
+//     playSysex() event queue (return value checked, default depth 1024);
+//     the SDL audio callback is the only thread that calls Synth::render().
+//     Engine telemetry (partials, part states, patch names, playing notes,
+//     LCD) is read by the render thread into a shadow snapshot that the UI
+//     reads under a mutex, so the UI never touches the live synth.
 //   - render()/renderPerChannel() take the 1-cycle fast escape on dormant
 //     channels (zeroed buffer, no synth stepping) and gate muted/
 //     solo-excluded channels to silence. Un-initialized devices render zeros.
@@ -47,8 +51,10 @@
 #define PKMN_AUDIO_DBG_DEVICES_MT32_DEVICE_H_
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "devices/midi_device.h"
@@ -117,8 +123,14 @@ class Mt32Device : public MidiDevice {
   std::string lcdText() const;
 
   // --- Part / voice queries (MUNT-QT parity) ---
-  const char* patchName(int part) const;
+  // Both read the telemetry shadow snapshot produced by the render thread,
+  // never the live synth, so the UI thread stays race-free.
+  std::string patchName(int part) const;
   int getPlayingNotes(int part, std::uint8_t* keys, std::uint8_t* velocities) const;
+
+  // --- Engine queue health (thread-safe) ---
+  // Number of short/SysEx messages the MUNT event queue rejected (full).
+  std::uint32_t droppedMessages() const { return dropped_msgs_.load(); }
 
   // --- Mode queries ---
   bool isMock() const { return mock_; }
@@ -132,10 +144,39 @@ class Mt32Device : public MidiDevice {
   bool synthAudible(int ch) const;
   void renderMockMono(float* out, std::size_t frames, int only_channel);
   void renderSynthMono(float* out, std::size_t frames);
-  void muteOthersForStem(int solo_ch);
-  void restoreVolumes();
+
+  // --- Thread-safe MUNT command queue ---
+  // The UI/engine thread enqueues via Synth::playMsg()/playSysex() (safe to
+  // call from any thread, no synchronisation needed with the renderer); the
+  // SDL audio callback is the only thread that calls Synth::render().
+  // The immediate-send variants (the "*Now" methods) are NEVER used: their
+  // header requires the caller to be synchronised with the render thread.
+  bool queueMsg(std::uint32_t msg);
+  bool queueSysex(const std::uint8_t* data, std::size_t len);
+
+  // Mute = pre-synth Note-On filter (MidiDevice) + note-offs for held notes.
+  // NEVER CC7=0 (the MT-32 captures part volume at note start).
+  void silenceChannel(int ch);
+  void silenceOthersForStem(int solo_ch);
+
+  // MUNT telemetry shadow. Refreshed only by the render thread; the UI reads
+  // it under telemetry_mutex_.
+  void updateTelemetry();
   void parseDisplaySysEx(const std::uint8_t* data, std::size_t len);
   bool resolveRomPair();
+
+  static constexpr std::uint32_t kSysexQueueStorage = 4096;
+
+  struct Telemetry {
+    int partial_count = 0;
+    std::array<int, kPartialSlots> partial_state{};
+    std::array<int, kParts> part_active{};
+    std::array<std::array<char, 24>, kParts> patch_name{};
+    std::array<int, kParts> playing_count{};
+    std::array<std::array<std::uint8_t, 32>, kParts> playing_keys{};
+    std::array<std::array<std::uint8_t, 32>, kParts> playing_vel{};
+    std::array<char, kLcdChars + 1> lcd{};
+  };
 
   std::uint32_t sample_rate_;
   bool inited_ = false;
@@ -150,6 +191,11 @@ class Mt32Device : public MidiDevice {
   std::array<char, kLcdChars + 1> lcd_{};
   // Mock voice phases, driven by the base note matrix.
   std::array<std::array<double, 128>, kChannels> phases_{};
+  // Messages rejected by the full MUNT event queue (see droppedMessages()).
+  std::atomic<std::uint32_t> dropped_msgs_{0};
+  // Guards telemetry_ between the render thread and the UI thread.
+  mutable std::mutex telemetry_mutex_;
+  Telemetry telemetry_;
 };
 
 }  // namespace audio_dbg

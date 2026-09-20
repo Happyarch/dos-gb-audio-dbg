@@ -171,12 +171,13 @@ bool Mt32Device::init() {
     const char* init_msg = "NO ROM - MOCK MODE";
     std::memcpy(lcd_.data(), init_msg, std::strlen(init_msg));
   } else {
-    char buf[kLcdChars + 1];
-    if (synth_->getDisplayState(buf)) {
-      (void)buf;
-    }
-    std::memcpy(lcd_.data(), buf, kLcdChars);
-    lcd_[kLcdChars] = '\0';
+    // Realtime-safe SysEx storage for the MIDI event queue: the UI/engine
+    // thread enqueues SysEx while the audio thread renders. The default
+    // storage allocates/frees per event and is explicitly not realtime-safe.
+    synth_->configureMIDIEventQueueSysexStorage(kSysexQueueStorage);
+    // Seed the telemetry shadow so the UI has valid data before the first
+    // audio block (init runs before the mixer is attached to this device).
+    updateTelemetry();
   }
   inited_ = true;
   return true;
@@ -212,19 +213,63 @@ void Mt32Device::reset() {
   for (auto& row : phases_) row.fill(0.0);
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) return;
   // All Sound Off + All Notes Off on every channel; base note tracking is
-  // untouched (MidiDevice exposes no clear hook).
+  // untouched (MidiDevice exposes no clear hook). Queued, not immediate:
+  // the audio callback owns the render thread.
   for (int ch = 0; ch < kChannels; ++ch) {
-    const std::uint32_t off =
-        (0xB0u | static_cast<std::uint32_t>(ch)) | (120u << 8);
-    const std::uint32_t notes_off =
-        (0xB0u | static_cast<std::uint32_t>(ch)) | (123u << 8);
-    synth_->playMsgNow(off);
-    synth_->playMsgNow(notes_off);
+    queueMsg((0xB0u | static_cast<std::uint32_t>(ch)) | (120u << 8));
+    queueMsg((0xB0u | static_cast<std::uint32_t>(ch)) | (123u << 8));
+  }
+}
+
+bool Mt32Device::queueMsg(std::uint32_t msg) {
+  if (synth_ == nullptr || !synth_open_) return false;
+  // playMsg() is the thread-safe enqueue (no sync needed with the renderer).
+  // It returns false when the queue is full; count the drop instead of
+  // silently losing the event.
+  if (synth_->playMsg(msg)) return true;
+  dropped_msgs_.fetch_add(1);
+  return false;
+}
+
+bool Mt32Device::queueSysex(const std::uint8_t* data, std::size_t len) {
+  if (data == nullptr || len == 0 || synth_ == nullptr || !synth_open_) {
+    return false;
+  }
+  if (synth_->playSysex(data, static_cast<MT32Emu::Bit32u>(len))) return true;
+  dropped_msgs_.fetch_add(1);
+  return false;
+}
+
+void Mt32Device::silenceChannel(int ch) {
+  if (!chInRange(ch)) return;
+  // Close the base tracking bars and forward a real Note-Off per held key.
+  for (int note = 0; note < 128; ++note) {
+    if (isNoteSounding(ch, note)) noteOff(ch, note);
+  }
+  if (synth_ == nullptr || !synth_open_) return;
+  // CC123 All Notes Off then CC120 All Sound Off: kills sustained voices a
+  // plain Note-Off would leave ringing. NEVER CC7=0 — the MT-32 captures
+  // part volume at note start, so a CC7 write would silence this part on
+  // its next note-on.
+  queueMsg((0xB0u | static_cast<std::uint32_t>(ch)) | (123u << 8));
+  queueMsg((0xB0u | static_cast<std::uint32_t>(ch)) | (120u << 8));
+}
+
+void Mt32Device::silenceOthersForStem(int solo_ch) {
+  // Stem isolation: silence every other live channel. Fast-escape dormant
+  // channels (they own no voices and cost nothing).
+  for (int ch = 0; ch < kChannels; ++ch) {
+    if (ch == solo_ch || isDormant(ch)) continue;
+    silenceChannel(ch);
   }
 }
 
 void Mt32Device::dispatchNoteOn(int ch, int note, int velocity) {
   if (!chInRange(ch) || note < 0 || note >= 128) return;
+  // Defense in depth for the pre-synth mute/solo filter: direct callers
+  // (bypassing MidiDevice::noteOn) must not allocate a voice on a muted or
+  // solo-excluded channel. Mute never rides CC7, so this is the gate.
+  if (shouldFilterNoteOn(ch)) return;
   channel(ch).freq = static_cast<float>(midiHz(note));
   channel(ch).last_note = note;
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) return;
@@ -234,7 +279,7 @@ void Mt32Device::dispatchNoteOn(int ch, int note, int velocity) {
       (0x90u | static_cast<std::uint32_t>(ch & 0x0F)) |
       (static_cast<std::uint32_t>(note) << 8) |
       (static_cast<std::uint32_t>(velocity) << 16);
-  synth_->playMsgNow(msg);
+  queueMsg(msg);
 }
 
 void Mt32Device::dispatchNoteOff(int ch, int note) {
@@ -244,7 +289,7 @@ void Mt32Device::dispatchNoteOff(int ch, int note) {
   const std::uint32_t msg =
       (0x80u | static_cast<std::uint32_t>(ch & 0x0F)) |
       (static_cast<std::uint32_t>(note) << 8);
-  synth_->playMsgNow(msg);
+  queueMsg(msg);
 }
 
 void Mt32Device::programChange(int ch, int program) {
@@ -259,7 +304,7 @@ void Mt32Device::dispatchProgramChange(int ch, int program) {
   const std::uint32_t msg =
       (0xC0u | static_cast<std::uint32_t>(ch & 0x0F)) |
       (static_cast<std::uint32_t>(prog) << 8);
-  synth_->playMsgNow(msg);
+  queueMsg(msg);
 }
 
 void Mt32Device::sendControlChange(int ch, int cc, int value) {
@@ -275,14 +320,17 @@ void Mt32Device::dispatchControlChange(int ch, int cc, int value) {
       (0xB0u | static_cast<std::uint32_t>(ch & 0x0F)) |
       (static_cast<std::uint32_t>(cc) << 8) |
       (static_cast<std::uint32_t>(val) << 16);
-  synth_->playMsgNow(msg);
+  queueMsg(msg);
 }
 
 void Mt32Device::dispatchSysEx(const std::uint8_t* data, std::size_t len) {
   if (data == nullptr || len == 0) return;
   if (mock_) parseDisplaySysEx(data, len);
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) return;
-  synth_->playSysexNow(data, static_cast<MT32Emu::Bit32u>(len));
+  // playSysex() copies the payload into the queue's preallocated storage
+  // (configureMIDIEventQueueSysexStorage), so the caller's buffer may be
+  // transient. It is safe to call from the UI thread.
+  queueSysex(data, len);
 }
 
 void Mt32Device::parseDisplaySysEx(const std::uint8_t* data,
@@ -322,14 +370,8 @@ int Mt32Device::activePartialCount() const {
     }
     return count > kPartialSlots ? kPartialSlots : count;
   }
-  const MT32Emu::Bit32u n = synth_->getPartialCount();
-  std::vector<MT32Emu::PartialState> states(n);
-  synth_->getPartialStates(states.data());
-  int count = 0;
-  for (MT32Emu::Bit32u i = 0; i < n; ++i) {
-    if (states[i] != MT32Emu::PartialState_INACTIVE) ++count;
-  }
-  return count;
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  return telemetry_.partial_count;
 }
 
 int Mt32Device::partialState(int slot) const {
@@ -339,11 +381,8 @@ int Mt32Device::partialState(int slot) const {
                ? static_cast<int>(MT32Emu::PartialState_SUSTAIN)
                : static_cast<int>(MT32Emu::PartialState_INACTIVE);
   }
-  const MT32Emu::Bit32u n = synth_->getPartialCount();
-  std::vector<MT32Emu::PartialState> states(n);
-  synth_->getPartialStates(states.data());
-  if (static_cast<MT32Emu::Bit32u>(slot) >= n) return -1;
-  return static_cast<int>(states[static_cast<std::size_t>(slot)]);
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  return telemetry_.partial_state[static_cast<std::size_t>(slot)];
 }
 
 bool Mt32Device::partActive(int part) const {
@@ -352,16 +391,16 @@ bool Mt32Device::partActive(int part) const {
     const int ch = (part == 8) ? kRhythmChannel : part + 1;
     return !isDormant(ch) && activeNoteCount(ch) > 0;
   }
-  return ((synth_->getPartStates() >> part) & 1u) != 0;
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  return telemetry_.part_active[static_cast<std::size_t>(part)] != 0;
 }
 
 std::string Mt32Device::lcdText() const {
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) {
     return std::string(lcd_.data(), kLcdChars);
   }
-  char buf[kLcdChars + 1];
-  synth_->getDisplayState(buf);
-  return std::string(buf);
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  return std::string(telemetry_.lcd.data());
 }
 
 void Mt32Device::renderMockMono(float* out, std::size_t frames,
@@ -408,35 +447,55 @@ void Mt32Device::renderSynthMono(float* out, std::size_t frames) {
     }
     done += want;
   }
+  // The render thread is the only thread that touches the live synth, so
+  // refresh the UI telemetry shadow from here (under the shadow mutex).
+  updateTelemetry();
+}
+
+void Mt32Device::updateTelemetry() {
+  if (synth_ == nullptr || !synth_open_) return;
+  Telemetry t;
+  const MT32Emu::Bit32u partials = synth_->getPartialCount();
+  std::vector<MT32Emu::PartialState> states(partials > 0 ? partials : 1u);
+  synth_->getPartialStates(states.data());
+  int count = 0;
+  for (MT32Emu::Bit32u i = 0; i < partials; ++i) {
+    if (states[i] != MT32Emu::PartialState_INACTIVE) ++count;
+    if (i < static_cast<MT32Emu::Bit32u>(kPartialSlots)) {
+      t.partial_state[i] = static_cast<int>(states[i]);
+    }
+  }
+  t.partial_count = count;
+  const MT32Emu::Bit32u part_states = synth_->getPartStates();
+  for (int part = 0; part < kParts; ++part) {
+    t.part_active[static_cast<std::size_t>(part)] =
+        static_cast<int>((part_states >> part) & 1u);
+    const char* name =
+        synth_->getPatchName(static_cast<MT32Emu::Bit8u>(part));
+    std::snprintf(t.patch_name[static_cast<std::size_t>(part)].data(),
+                  t.patch_name[static_cast<std::size_t>(part)].size(), "%s",
+                  name != nullptr ? name : "");
+    std::uint8_t keys[32] = {0};
+    std::uint8_t vels[32] = {0};
+    const MT32Emu::Bit32u cnt = synth_->getPlayingNotes(
+        static_cast<MT32Emu::Bit8u>(part), keys, vels);
+    const int n = static_cast<int>(cnt < 32u ? cnt : 32u);
+    t.playing_count[static_cast<std::size_t>(part)] = n;
+    for (int i = 0; i < n; ++i) {
+      t.playing_keys[static_cast<std::size_t>(part)]
+                    [static_cast<std::size_t>(i)] = keys[i];
+      t.playing_vel[static_cast<std::size_t>(part)]
+                   [static_cast<std::size_t>(i)] = vels[i];
+    }
+  }
   char buf[kLcdChars + 1];
+  std::memset(buf, ' ', kLcdChars);
+  buf[kLcdChars] = '\0';
   synth_->getDisplayState(buf);
-  std::memcpy(lcd_.data(), buf, kLcdChars);
-  lcd_[kLcdChars] = '\0';
-}
-
-void Mt32Device::muteOthersForStem(int solo_ch) {
-  for (int ch = 0; ch < kChannels; ++ch) {
-    const int vol = (ch == solo_ch) ? controlChange(ch, 7) : 0;
-    const std::uint32_t msg =
-        (0xB0u | static_cast<std::uint32_t>(ch & 0x0F)) | (7u << 8) |
-        (static_cast<std::uint32_t>(vol) << 16);
-    synth_->playMsgNow(msg);
-  }
-}
-
-void Mt32Device::restoreVolumes() {
-  // Converge the engine to the live mute matrix: audible channels get
-  // their tracked CC7, muted/solo-excluded channels stay at 0. Without
-  // this, a restore-to-base would re-arm full volume between renders and
-  // voices allocated on a muted channel would be born loud (the MT-32
-  // captures part volume at note start).
-  for (int ch = 0; ch < kChannels; ++ch) {
-    const int vol = synthAudible(ch) ? controlChange(ch, 7) : 0;
-    const std::uint32_t msg =
-        (0xB0u | static_cast<std::uint32_t>(ch & 0x0F)) | (7u << 8) |
-        (static_cast<std::uint32_t>(vol) << 16);
-    synth_->playMsgNow(msg);
-  }
+  std::memcpy(t.lcd.data(), buf, kLcdChars);
+  t.lcd[kLcdChars] = '\0';
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  telemetry_ = t;
 }
 
 void Mt32Device::render(float* buf, std::size_t frames) {
@@ -454,20 +513,29 @@ void Mt32Device::render(float* buf, std::size_t frames) {
 
 void Mt32Device::setMute(int ch, bool muted) {
   MidiDevice::setMute(ch, muted);
-  restoreVolumes();
+  // Mute = pre-synth Note-On filter (MidiDevice) + note-offs for held notes.
+  // Never CC7=0: the MT-32 captures part volume at note start, so a CC7
+  // write aimed at a dormant channel silences it forever.
+  if (muted) silenceChannel(ch);
 }
 
 void Mt32Device::setSolo(int ch, bool soloed) {
   MidiDevice::setSolo(ch, soloed);
-  restoreVolumes();
+  if (!soloed) return;  // Un-solo: nothing held needs silencing.
+  // Enabling any solo makes every non-solo channel inaudible: release the
+  // voices they are holding now rather than leaving them ringing.
+  for (int other = 0; other < kChannels; ++other) {
+    if (!synthAudible(other)) silenceChannel(other);
+  }
 }
 
-const char* Mt32Device::patchName(int part) const {
+std::string Mt32Device::patchName(int part) const {
   if (part == 8) return "Rhythm Channel";
-  if (synth_ != nullptr && synth_open_ && !mock_) {
-    const char* name =
-        synth_->getPatchName(static_cast<MT32Emu::Bit8u>(part));
-    if (name != nullptr && name[0] != '\0') return name;
+  if (part >= 0 && part < kParts && synth_ != nullptr && synth_open_ &&
+      !mock_) {
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    return std::string(telemetry_.patch_name[static_cast<std::size_t>(part)]
+                           .data());
   }
   const int ch = (part == 8) ? kRhythmChannel : part + 1;
   return mt32TimbreName(program(ch));
@@ -477,8 +545,14 @@ int Mt32Device::getPlayingNotes(int part, std::uint8_t* keys,
                                 std::uint8_t* velocities) const {
   if (part < 0 || part >= kParts) return 0;
   if (synth_ != nullptr && synth_open_ && !mock_) {
-    return static_cast<int>(synth_->getPlayingNotes(
-        static_cast<MT32Emu::Bit8u>(part), keys, velocities));
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    const std::size_t p = static_cast<std::size_t>(part);
+    const int count = telemetry_.playing_count[p];
+    for (int i = 0; i < count; ++i) {
+      if (keys != nullptr) keys[i] = telemetry_.playing_keys[p][i];
+      if (velocities != nullptr) velocities[i] = telemetry_.playing_vel[p][i];
+    }
+    return count;
   }
   // Mock / fallback: read from MidiDevice note tracking.
   const int ch = (part == 8) ? kRhythmChannel : part + 1;
@@ -511,10 +585,10 @@ void Mt32Device::renderPerChannel(float** bufs, std::size_t frames) {
       renderMockMono(bufs[ch], frames, ch);
       continue;
     }
-    // Real synth: isolate this channel with the CC7 mute-others dance.
-    muteOthersForStem(ch);
+    // Real synth: isolate this channel by releasing the others' held notes
+    // (never CC7=0). See silenceOthersForStem().
+    silenceOthersForStem(ch);
     renderSynthMono(bufs[ch], frames);
-    restoreVolumes();
   }
 }
 

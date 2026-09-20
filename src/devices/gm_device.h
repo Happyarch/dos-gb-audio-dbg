@@ -8,9 +8,12 @@
 //     sine mixer driven by the MidiDevice note matrix, so dispatch,
 //     rendering, and dormant-skipping stay testable on any machine.
 //   - 16-channel MIDI render at 44100 Hz via fluid_synth_write_float().
-//     Per-channel stem isolation uses a CC7 mute-others dance; every
-//     render converges engine volumes to the live mute matrix
-//     (audible?tracked-CC7:0), so muted channels stay silent across calls.
+//     Mute/solo is enforced by the pre-synth Note-On filter plus
+//     Note-Off/CC120/CC123 for held notes — NEVER by CC7=0 (a CC7 write is
+//     a volume change, not a mute, and it leaks into the next note). The
+//     per-block render no longer converges CC7 volumes. Per-channel stem
+//     isolation releases the other channels' held notes through the same
+//     note-off path.
 //   - standard 128-name General MIDI patch resolver.
 //   - render()/renderPerChannel() take the 1-cycle fast escape on dormant
 //     channels (zeroed buffer, no synth stepping) and gate muted/
@@ -56,6 +59,8 @@ class GmDevice : public MidiDevice {
   void reset() override;
   void render(float* buf, std::size_t frames) override;
   void renderPerChannel(float** bufs, std::size_t frames) override;
+  void setMute(int ch, bool muted) override;
+  void setSolo(int ch, bool soloed) override;
 
   // --- MidiDevice voice hooks (synth writes live here) ---
   // Called only for non-filtered notes, so muted channels allocate nothing.
@@ -86,8 +91,10 @@ class GmDevice : public MidiDevice {
   bool synthAudible(int ch) const;
   void renderMockMono(float* out, std::size_t frames, int only_channel);
   void renderSynthMono(float* out, std::size_t frames);
-  void muteOthersForStem(int solo_ch);
-  void restoreVolumes();
+  // Mute = pre-synth Note-On filter (MidiDevice) + note-offs for held
+  // notes. NEVER CC7=0.
+  void silenceChannel(int ch);
+  void silenceOthersForStem(int solo_ch);
   bool loadSoundFont();
 
   std::uint32_t sample_rate_;

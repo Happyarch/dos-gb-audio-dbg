@@ -166,13 +166,17 @@ void GmDevice::reset() {
   for (auto& row : phases_) row.fill(0.0);
   if (!inited_ || mock_ || synth_ == nullptr) return;
   for (int ch = 0; ch < kChannels; ++ch) {
-    fluid_synth_all_sounds_off(synth_, ch);
     fluid_synth_all_notes_off(synth_, ch);
+    fluid_synth_all_sounds_off(synth_, ch);
   }
 }
 
 void GmDevice::dispatchNoteOn(int ch, int note, int velocity) {
   if (!chInRange(ch) || note < 0 || note >= 128) return;
+  // Defense in depth for the pre-synth mute/solo filter: direct callers
+  // (bypassing MidiDevice::noteOn) must not allocate a voice on a muted or
+  // solo-excluded channel. Mute never rides CC7, so this is the gate.
+  if (shouldFilterNoteOn(ch)) return;
   channel(ch).freq = static_cast<float>(midiHz(note));
   channel(ch).last_note = note;
   if (!inited_ || mock_ || synth_ == nullptr) return;
@@ -269,18 +273,27 @@ void GmDevice::renderSynthMono(float* out, std::size_t frames) {
   }
 }
 
-void GmDevice::muteOthersForStem(int solo_ch) {
-  for (int ch = 0; ch < kChannels; ++ch) {
-    fluid_synth_cc(synth_, ch, 7, (ch == solo_ch) ? controlChange(ch, 7) : 0);
+void GmDevice::silenceChannel(int ch) {
+  if (!chInRange(ch)) return;
+  // Close the base tracking bars and forward a real Note-Off per held key.
+  for (int note = 0; note < 128; ++note) {
+    if (isNoteSounding(ch, note)) noteOff(ch, note);
   }
+  if (synth_ == nullptr) return;
+  // CC123 All Notes Off then CC120 All Sound Off: kills sustained voices a
+  // plain Note-Off would leave ringing. Order matters on FluidSynth —
+  // sending All Notes Off after All Sound Off un-cuts the channel. NEVER
+  // CC7=0 — a volume write is not a mute and it leaks into the next note.
+  fluid_synth_all_notes_off(synth_, ch);
+  fluid_synth_all_sounds_off(synth_, ch);
 }
 
-void GmDevice::restoreVolumes() {
-  // Converge the engine to the live mute matrix: audible channels get
-  // their tracked CC7, muted/solo-excluded channels stay at 0, so voices
-  // allocated on a muted channel between renders are born silent.
+void GmDevice::silenceOthersForStem(int solo_ch) {
+  // Stem isolation: silence every other live channel. Fast-escape dormant
+  // channels (they own no voices and cost nothing).
   for (int ch = 0; ch < kChannels; ++ch) {
-    fluid_synth_cc(synth_, ch, 7, synthAudible(ch) ? controlChange(ch, 7) : 0);
+    if (ch == solo_ch || isDormant(ch)) continue;
+    silenceChannel(ch);
   }
 }
 
@@ -294,12 +307,26 @@ void GmDevice::render(float* buf, std::size_t frames) {
     renderMockMono(buf, frames, -1);
     return;
   }
-  // Converge engine volumes to the mute matrix every block (16 CCs,
-  // negligible vs synthesis): this flushes pending mute/unmute/CC changes
-  // even when no voice is sounding, so voices allocated afterwards are
-  // born under the live matrix.
-  restoreVolumes();
+  // No per-block CC7 convergence: mute is a pre-synth Note-On filter plus
+  // note-offs, so there is no engine volume to converge.
   renderSynthMono(buf, frames);
+}
+
+void GmDevice::setMute(int ch, bool muted) {
+  MidiDevice::setMute(ch, muted);
+  // Mute = pre-synth Note-On filter (MidiDevice) + note-offs for held notes.
+  // Never CC7=0.
+  if (muted) silenceChannel(ch);
+}
+
+void GmDevice::setSolo(int ch, bool soloed) {
+  MidiDevice::setSolo(ch, soloed);
+  if (!soloed) return;  // Un-solo: nothing held needs silencing.
+  // Enabling any solo makes every non-solo channel inaudible: release the
+  // voices they are holding now rather than leaving them ringing.
+  for (int other = 0; other < kChannels; ++other) {
+    if (!synthAudible(other)) silenceChannel(other);
+  }
 }
 
 void GmDevice::renderPerChannel(float** bufs, std::size_t frames) {
@@ -319,10 +346,10 @@ void GmDevice::renderPerChannel(float** bufs, std::size_t frames) {
       renderMockMono(bufs[ch], frames, ch);
       continue;
     }
-    // Real synth: isolate this channel with the CC7 mute-others dance.
-    muteOthersForStem(ch);
+    // Real synth: isolate this channel by releasing the others' held notes
+    // (never CC7=0). See silenceOthersForStem().
+    silenceOthersForStem(ch);
     renderSynthMono(bufs[ch], frames);
-    restoreVolumes();
   }
 }
 
