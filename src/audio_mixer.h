@@ -9,9 +9,13 @@
 // exact code the callback runs.
 //
 // Resampling: synth cores render at their native rate (e.g. 44100 Hz) while
-// the output device runs at 48 kHz. Conversion is linear interpolation
-// (resampleLinear). `SoundDevice::render()` produces mono; the mixer expands
-// to stereo (L == R) after applying master gain/mute.
+// the output device runs at 48 kHz. Conversion uses a band-limited
+// `SDL_AudioStream`, created once per device in setDevice() (UI thread, never
+// inside the audio callback), reading/writing preallocated scratch. The old
+// per-callback linear-interpolation FIFO is gone. `resampleLinear` survives
+// only for the off-realtime stems/recorder path (renderStemsBlock).
+// `SoundDevice::render()` produces mono; the mixer expands to stereo
+// (L == R) after applying master gain/mute.
 //
 // Scope + record feeds: every rendered block pushes post-gain mono into
 // `master_ring_` (mutex-guarded `WaveformRing` for the oscilloscope) and, when
@@ -32,6 +36,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <vector>
 
 #include <SDL.h>
 
@@ -72,6 +77,8 @@ class AudioMixer {
 
   // Active synth + its native rate. `device_rate <= 0` means "same as
   // output" (no resampling). Null device renders silence. Atomic swap.
+  // Builds the SDL_AudioStream resampler for this rate here, on the calling
+  // (UI) thread -- never from the audio callback.
   void setDevice(SoundDevice* dev, int device_rate);
   SoundDevice* device() const { return device_.load(); }
   int deviceRate() const { return device_rate_.load(); }
@@ -116,8 +123,26 @@ class AudioMixer {
   void clearMasterWaveform();
 
  private:
+  // One resampler configuration: a band-limited SDL_AudioStream plus the
+  // fractional input-sample carry that keeps its backlog (and therefore its
+  // latency) constant. Published atomically by setDevice() and consumed
+  // lock-free by renderBlock(). A state is never mutated or freed by
+  // setDevice() once published -- the callback that already loaded it stays
+  // valid; retired states are freed in shutdown().
+  struct ResampleState {
+    SDL_AudioStream* stream = nullptr;  // null => passthrough (rates equal)
+    int in_rate = 0;
+    int out_rate = 0;
+    double frac = 0.0;    // fractional input-sample carry (< out_rate)
+    bool primed = false;  // resampler filter-history priming applied once
+  };
+
   static void SDLCALL sdlCallback(void* userdata, Uint8* stream, int len);
   void pushMasterRing(const float* mono, std::size_t frames);
+  // Pulls `frames` output frames through the published resampler into
+  // `mono`; zero-fills if no stream is available. Realtime-safe: uses only
+  // preallocated scratch and the lock-free published state.
+  void resampleInto(SoundDevice* dev, std::size_t frames, float* mono);
 
   std::atomic<SoundDevice*> device_{nullptr};
   std::atomic<int> device_rate_{kDefaultOutputRate};
@@ -134,10 +159,21 @@ class AudioMixer {
   mutable std::mutex ring_mutex_;
   WaveformRing master_ring_{65536};
 
-  mutable std::mutex resample_mutex_;
-  double resample_phase_ = 0.0;
-  std::vector<float> resample_fifo_;
-  std::size_t fifo_head_ = 0;
+  // Resampler states (see ResampleState). resampler_ is the live one;
+  // retired_resamplers_ holds superseded states until shutdown().
+  std::atomic<ResampleState*> resampler_{nullptr};
+  std::vector<ResampleState*> retired_resamplers_;
+
+  // Realtime scratch, allocated in init() and never resized by the callback.
+  std::size_t scratch_frames_ = 0;
+  std::vector<float> mono_scratch_;
+  std::vector<float> dev_scratch_;
+
+  // Floor for the realtime scratch (frames); a larger request is clamped and
+  // the tail zero-filled rather than allocating on the audio thread.
+  static constexpr std::size_t kScratchFrames = 8192;
+  // Extra input frames fed once to prime the SDL resampler's filter history.
+  static constexpr std::size_t kResamplerPrime = 32;
 };
 
 }  // namespace audio_dbg

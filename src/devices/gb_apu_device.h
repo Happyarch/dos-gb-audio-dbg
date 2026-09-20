@@ -47,7 +47,13 @@ namespace audio_dbg {
 class GbApuDevice : public PsgDevice {
  public:
   static constexpr int kChannels = 4;
-  static constexpr long kDefaultRate = 49716;
+  // Native rate == the mixer's 48 kHz output rate, so the device takes the
+  // dev_rate == out_rate 1:1 passthrough in AudioMixer::renderBlock and the
+  // mixer needs no resampler for it. Pitch is unaffected: GbVoiceApu pins
+  // Stereo_Buffer's clock_rate to 4194304 independently of the sample rate
+  // (gb_apu_device.cpp set_sample_rate), so Blip_Buffer just synthesizes its
+  // band-limited output at 48000 instead of 49716.
+  static constexpr long kDefaultRate = 48000;
 
   // GB audio register addresses.
   static constexpr std::uint16_t kRegBase = 0xFF10;

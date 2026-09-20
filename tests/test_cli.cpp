@@ -213,7 +213,10 @@ int main() {
     std::uint32_t rate = 0;
     std::string canon, err;
     auto dev = createHeadlessDevice("GB-APU", &rate, &canon, &err);
-    CHECK(dev != nullptr && canon == "gbapu" && rate == 49716u);
+    // GB-APU now defaults to 48000 Hz (the mixer's output rate) so it takes
+    // the 1:1 passthrough path; Blip_Buffer's clock_rate is fixed at 4194304,
+    // so pitch is unchanged.
+    CHECK(dev != nullptr && canon == "gbapu" && rate == 48000u);
     CHECK(createHeadlessDevice("nope", &rate, &canon, &err) == nullptr);
     std::printf("PASS device normalization\n");
   }

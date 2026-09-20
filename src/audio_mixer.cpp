@@ -3,7 +3,8 @@
 #include "audio_mixer.h"
 
 #include <algorithm>
-#include <cmath>
+#include <cstring>
+#include <new>
 #include <vector>
 
 #include "recorder.h"
@@ -22,11 +23,22 @@ bool AudioMixer::init(int output_rate, int buffer_frames, bool disabled) {
   buffer_frames_ = buffer_frames;
   device_rate_.store(output_rate);
   disabled_ = disabled;
+  // Realtime scratch: sized once here (UI thread) so the audio callback never
+  // allocates. Extra headroom over the device block covers any resample ratio
+  // up to ~1.125x without touching the allocator.
+  scratch_frames_ = static_cast<std::size_t>(buffer_frames_) > kScratchFrames
+                        ? static_cast<std::size_t>(buffer_frames_)
+                        : kScratchFrames;
+  mono_scratch_.assign(scratch_frames_, 0.0f);
+  dev_scratch_.assign(scratch_frames_ + scratch_frames_ / 8 +
+                          kResamplerPrime + 8,
+                      0.0f);
   if (disabled) {
     open_ = true;
     return true;
   }
-  SDL_setenv("SDL_AUDIODRIVER", "pipewire", 1);
+  // NOTE: SDL_AUDIODRIVER is set in main.cpp before SDL_Init(); setting it
+  // here (after the audio subsystem has already chosen its driver) is dead.
   SDL_AudioSpec want;
   SDL_zero(want);
   want.freq = output_rate_;
@@ -54,6 +66,19 @@ void AudioMixer::shutdown() {
     SDL_CloseAudioDevice(audio_dev_);
     audio_dev_ = 0;
   }
+  // The SDL audio callback is stopped, so it is now safe to free the live
+  // resampler and every state retired by earlier setDevice() calls.
+  ResampleState* live = resampler_.exchange(nullptr);
+  if (live != nullptr) {
+    if (live->stream != nullptr) SDL_FreeAudioStream(live->stream);
+    delete live;
+  }
+  for (ResampleState* rs : retired_resamplers_) {
+    if (rs == nullptr) continue;
+    if (rs->stream != nullptr) SDL_FreeAudioStream(rs->stream);
+    delete rs;
+  }
+  retired_resamplers_.clear();
   open_ = false;
   disabled_ = false;
 }
@@ -71,13 +96,68 @@ void AudioMixer::unlock() {
 }
 
 void AudioMixer::setDevice(SoundDevice* dev, int device_rate) {
+  if (device_rate <= 0) {
+    device_rate = output_rate_ > 0 ? output_rate_ : kDefaultOutputRate;
+  }
   device_.store(dev);
-  if (device_rate <= 0) device_rate = output_rate_;
   device_rate_.store(device_rate);
-  std::lock_guard<std::mutex> lock(resample_mutex_);
-  resample_phase_ = 0.0;
-  resample_fifo_.clear();
-  fifo_head_ = 0;
+
+  // Build the resampler HERE -- on the UI thread, outside the audio callback
+  // -- rather than doing linear interpolation per callback. SDL_AudioStream
+  // is band-limited conversion (SDL's own resampler): the anti-alias low-pass
+  // the hand-rolled path never had.
+  ResampleState* rs = new (std::nothrow) ResampleState();
+  if (rs == nullptr) return;
+  rs->in_rate = device_rate;
+  rs->out_rate = output_rate_ > 0 ? output_rate_ : kDefaultOutputRate;
+  if (rs->in_rate != rs->out_rate) {
+    rs->stream = SDL_NewAudioStream(AUDIO_F32SYS, 1, rs->in_rate, AUDIO_F32SYS,
+                                    1, rs->out_rate);
+    if (rs->stream != nullptr) SDL_AudioStreamClear(rs->stream);
+  }
+  // Publish. The superseded state is retired, NOT freed: a callback already
+  // inside resampleInto() may still be using it. Freed in shutdown().
+  ResampleState* old = resampler_.exchange(rs);
+  if (old != nullptr) retired_resamplers_.push_back(old);
+}
+
+void AudioMixer::resampleInto(SoundDevice* dev, std::size_t frames,
+                              float* mono) {
+  ResampleState* rs = resampler_.load();
+  if (dev == nullptr || rs == nullptr || rs->stream == nullptr) {
+    std::memset(mono, 0, frames * sizeof(float));
+    return;
+  }
+  // Exact fractional input accounting: feeding ceil() every block would grow
+  // the stream's backlog (latency creep), so carry the fraction and feed the
+  // exact average. The one-time priming offset covers the filter's initial
+  // history without shifting the long-run rate.
+  rs->frac += static_cast<double>(frames) * static_cast<double>(rs->in_rate);
+  std::size_t dev_frames =
+      static_cast<std::size_t>(rs->frac / static_cast<double>(rs->out_rate));
+  rs->frac -=
+      static_cast<double>(dev_frames) * static_cast<double>(rs->out_rate);
+  if (!rs->primed) {
+    dev_frames += kResamplerPrime;
+    rs->primed = true;
+  }
+  if (dev_frames > dev_scratch_.size()) dev_frames = dev_scratch_.size();
+  if (dev_frames == 0) dev_frames = 1;
+
+  // Pull the device at its native rate: this is the AudioClockShim's
+  // sample-accounting boundary, so it must run every block.
+  dev->render(dev_scratch_.data(), dev_frames);
+  SDL_AudioStreamPut(rs->stream, dev_scratch_.data(),
+                     static_cast<int>(dev_frames * sizeof(float)));
+  const int want_bytes = static_cast<int>(frames * sizeof(float));
+  const int got_bytes = SDL_AudioStreamGet(rs->stream, mono, want_bytes);
+  const std::size_t got =
+      got_bytes > 0
+          ? std::min(static_cast<std::size_t>(got_bytes) / sizeof(float), frames)
+          : 0;
+  if (got < frames) {
+    std::memset(mono + got, 0, (frames - got) * sizeof(float));
+  }
 }
 
 void AudioMixer::setDeviceChannelMute(int ch, bool muted) {
@@ -144,61 +224,50 @@ void AudioMixer::renderBlock(float* stereo_out, std::size_t frames) {
   SoundDevice* dev = device_.load();
   const float gain = master_gain_.load();
   const bool muted = master_muted_.load();
-  const int out_rate = output_rate_ > 0 ? output_rate_ : kDefaultOutputRate;
-  int dev_rate = device_rate_.load();
-  if (dev_rate <= 0) dev_rate = out_rate;
 
-  std::vector<float> mono(frames, 0.0f);
+  // Realtime path: preallocated scratch only. No allocator, no mutex, no
+  // erase/insert memmove on this thread.
+  float* mono = mono_scratch_.data();
+  std::size_t n = frames;
+  if (n > scratch_frames_) {
+    n = scratch_frames_;
+    // Anything past the preallocated window is silence, not an allocation.
+    std::memset(stereo_out + n * 2, 0, (frames - n) * 2 * sizeof(float));
+  }
+  if (n == 0) {  // renderBlock before init(): nothing to render into.
+    std::memset(stereo_out, 0, frames * 2 * sizeof(float));
+    return;
+  }
+
+  // Clock accounting FIRST, BEFORE the master-mute check: the device (and
+  // through it the AudioClockShim) must be pulled every block or muting
+  // freezes the audio-driven transport clock. Mute silences the mix only.
+  ResampleState* rs = resampler_.load();
+  if (dev == nullptr) {
+    std::memset(mono, 0, n * sizeof(float));
+  } else if (rs != nullptr && rs->in_rate != rs->out_rate) {
+    resampleInto(dev, n, mono);
+  } else {
+    dev->render(mono, n);
+  }
+
+  // Master gain/mute applied AFTER the device run.
   if (dev != nullptr && !muted) {
-    if (dev_rate == out_rate) {
-      dev->render(mono.data(), frames);
-      if (gain != 1.0f) {
-        for (std::size_t i = 0; i < frames; ++i) mono[i] *= gain;
-      }
-    } else {
-      std::lock_guard<std::mutex> lock(resample_mutex_);
-      const double ratio =
-          static_cast<double>(dev_rate) / static_cast<double>(out_rate);
-      if (fifo_head_ > 0) {
-        resample_fifo_.erase(resample_fifo_.begin(),
-                             resample_fifo_.begin() + fifo_head_);
-        fifo_head_ = 0;
-      }
-      const std::size_t needed =
-          static_cast<std::size_t>(
-              std::ceil(static_cast<double>(frames) * ratio)) + 4;
-      if (resample_fifo_.size() < needed) {
-        const std::size_t to_render = needed - resample_fifo_.size();
-        std::vector<float> dev_chunk(to_render, 0.0f);
-        dev->render(dev_chunk.data(), to_render);
-        resample_fifo_.insert(resample_fifo_.end(), dev_chunk.begin(),
-                              dev_chunk.end());
-      }
-      for (std::size_t i = 0; i < frames; ++i) {
-        if (fifo_head_ >= resample_fifo_.size()) break;
-        const float s0 = resample_fifo_[fifo_head_];
-        const float s1 = (fifo_head_ + 1 < resample_fifo_.size())
-                             ? resample_fifo_[fifo_head_ + 1]
-                             : s0;
-        mono[i] =
-            (s0 + (s1 - s0) * static_cast<float>(resample_phase_)) * gain;
-        resample_phase_ += ratio;
-        while (resample_phase_ >= 1.0) {
-          resample_phase_ -= 1.0;
-          ++fifo_head_;
-        }
-      }
+    if (gain != 1.0f) {
+      for (std::size_t i = 0; i < n; ++i) mono[i] *= gain;
     }
-  }  // else: silence (muted or deviceless).
+  } else {
+    std::memset(mono, 0, n * sizeof(float));
+  }
 
-  for (std::size_t i = 0; i < frames; ++i) {
+  for (std::size_t i = 0; i < n; ++i) {
     const float val = std::clamp(mono[i], -1.0f, 1.0f);
     stereo_out[i * 2] = val;
     stereo_out[i * 2 + 1] = val;
   }
-  pushMasterRing(mono.data(), frames);
+  pushMasterRing(mono, n);
   Recorder* rec = recorder_.load();
-  if (rec != nullptr) rec->pushMaster(stereo_out, frames);
+  if (rec != nullptr) rec->pushMaster(stereo_out, n);
 }
 
 void AudioMixer::renderStemsBlock(float* stereo_out, std::size_t frames) {
