@@ -1,5 +1,5 @@
-# Stage 1 scaffold: out-of-source CMake build directory.
-build/
+# Out-of-source CMake build directories (build/, build-int/, build-w1/, ...).
+build*/
 
 # CTest test output
 Testing/
