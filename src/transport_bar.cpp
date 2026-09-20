@@ -142,6 +142,7 @@ void TransportBar::togglePlayPause(SessionEngine& engine) {
 }
 
 void TransportBar::stop(SessionEngine& engine) {
+  silence(engine);
   engine.stop();
   resetAccumulator();
 }

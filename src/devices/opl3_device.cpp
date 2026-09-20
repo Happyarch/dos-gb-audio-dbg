@@ -84,6 +84,7 @@ void Opl3Device::shutdown() {
 
 void Opl3Device::reset() {
   if (!inited_) return;
+  resetVoices();
   regs_.fill(0);
   shadow_init_.fill(false);
   OPL3_Reset(main_chip_, sample_rate_);

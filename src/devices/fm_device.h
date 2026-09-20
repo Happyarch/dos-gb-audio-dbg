@@ -67,6 +67,8 @@ class FmDevice : public SoundDevice {
   bool isVoiceDormant(int v) const;
   // Wakes the voice and its SoundDevice channel (idempotent).
   void wakeVoice(int v);
+  // Resets all voice key/envelope state and silences channel activities.
+  void resetVoices();
 
   // --- Concrete state setters (wake + update + call hardware hook) ---
   void writeOperator(int voice, bool carrier, const FmOperatorParams& p);

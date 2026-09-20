@@ -45,6 +45,7 @@ void SessionEngine::stop() {
   is_paused_ = false;
   is_stopped_ = true;
   current_frame_ = 0;
+  silenceActiveDevice();
 }
 
 void SessionEngine::seekToFrame(std::uint32_t target) {
@@ -78,6 +79,8 @@ void SessionEngine::silenceActiveDevice() {
   if (active_device_ == nullptr) return;
   if (MidiDevice* midi = dynamic_cast<MidiDevice*>(active_device_)) {
     midi->allNotesOff();
+  } else {
+    active_device_->reset();
   }
 }
 
@@ -210,6 +213,7 @@ void SessionEngine::tick() {
     is_playing_ = false;
     is_paused_ = false;
     is_stopped_ = true;
+    silenceActiveDevice();
   }
 }
 

@@ -28,6 +28,20 @@ void FmDevice::wakeVoice(int v) {
   wakeChannel(v);
 }
 
+void FmDevice::resetVoices() {
+  for (std::size_t i = 0; i < voices_.size(); ++i) {
+    voices_[i].keyed_on = false;
+    voices_[i].env_vol = 0.0f;
+    if (channelValid(static_cast<int>(i))) {
+      ChannelState& st = channel(static_cast<int>(i));
+      st.active = false;
+      st.freq = 0.0f;
+      st.last_note = -1;
+      st.peak = 0.0f;
+    }
+  }
+}
+
 void FmDevice::writeOperator(int voice, bool carrier,
                              const FmOperatorParams& p) {
   if (!voiceValid(voice)) return;

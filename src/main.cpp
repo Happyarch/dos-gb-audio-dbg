@@ -322,9 +322,14 @@ int main(int argc, char** argv) {
                /*disabled=*/true);
   }
 
-  // Default to MT-32: the GB baseline loader below resolves the "mt32"
-  // target, so the dispatched stream matches the active backend.
-  int device_tab = 2;
+  // Backend selection: defaults to MT-32 or respects --device.
+  int initial_tab = 2;
+  if (cli_opt.device == "opl3") initial_tab = 0;
+  else if (cli_opt.device == "gbapu") initial_tab = 1;
+  else if (cli_opt.device == "gm") initial_tab = 3;
+
+  int device_tab = initial_tab;
+  int request_tab_switch = initial_tab;
   engine.setActiveDevice(devices[device_tab]);
   mixer.setDevice(devices[device_tab], device_rates[device_tab]);
 
@@ -418,6 +423,11 @@ int main(int argc, char** argv) {
         } else if (!(event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) &&
                    event.key.keysym.sym == SDLK_SLASH && !io.WantTextInput) {
           focus_search_input = true;
+        } else if (event.key.keysym.sym >= SDLK_F1 && event.key.keysym.sym <= SDLK_F4) {
+          request_tab_switch = event.key.keysym.sym - SDLK_F1;
+        } else if ((event.key.keysym.mod & KMOD_ALT) &&
+                   event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_4) {
+          request_tab_switch = event.key.keysym.sym - SDLK_1;
         } else if (!io.WantTextInput) {
           // Stage 6.4: transport shortcuts handled only when text input is not active
           audio_dbg::TransportKey tkey;
@@ -660,7 +670,9 @@ int main(int argc, char** argv) {
     if (ImGui::BeginTabBar("DeviceTabBar")) {
       for (int i = 0; i < 4; ++i) {
         ImGuiTabItemFlags flags = 0;
-        if (i == device_tab) flags = ImGuiTabItemFlags_SetSelected;
+        if (request_tab_switch == i) {
+          flags |= ImGuiTabItemFlags_SetSelected;
+        }
         if (ImGui::BeginTabItem(kDeviceTabs[i], nullptr, flags)) {
           if (device_tab != i) {
             mixer.lock();
@@ -678,6 +690,7 @@ int main(int argc, char** argv) {
           ImGui::EndTabItem();
         }
       }
+      request_tab_switch = -1;
       ImGui::EndTabBar();
     }
     ImGui::TextDisabled("Active device tab: %s", kDeviceTabs[device_tab]);

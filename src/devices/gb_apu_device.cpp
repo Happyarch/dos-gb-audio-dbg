@@ -148,6 +148,13 @@ void GbApuDevice::reset() {
       delete shadows_[i];
       shadows_[i] = nullptr;
     }
+    if (channelValid(i)) {
+      channel(i).active = false;
+      channel(i).freq = 0.0f;
+      channel(i).last_note = -1;
+      channel(i).dormant = true;
+      channel(i).peak = 0.0f;
+    }
   }
   shadow_init_.fill(false);
 }
