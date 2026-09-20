@@ -39,17 +39,34 @@ struct SongInfo;
 // frame counter.
 enum class ComparisonSlot { A = 0, B = 1 };
 
+enum class SimEventType : std::uint8_t {
+  Note = 0,
+  ProgramChange = 1,
+};
+
 // One simulated GB sound-driver voice event, stamped on the 60 Hz grid.
 struct SimNoteEvent {
   std::uint32_t frame = 0;       // Frame on which this event fires.
   std::uint8_t channel = 0;      // Driver channel (0-based).
-  std::uint8_t note = 60;        // MIDI note number.
+  std::uint8_t note = 60;        // MIDI note number (or program number if ProgramChange).
   std::uint8_t velocity = 100;   // 1..127.
   std::uint16_t duration_frames = 0;  // Informational hold length; the
                                       // matching note-off is a separate
                                       // event (see addNote()).
   bool is_note_on = true;        // False = note-off for (channel, note).
+  SimEventType type = SimEventType::Note;
 };
+
+inline int eventPriority(const SimNoteEvent& ev) {
+  if (ev.type == SimEventType::ProgramChange) return 0;
+  if (!ev.is_note_on) return 1;
+  return 2;
+}
+
+inline bool eventLess(const SimNoteEvent& a, const SimNoteEvent& b) {
+  if (a.frame != b.frame) return a.frame < b.frame;
+  return eventPriority(a) < eventPriority(b);
+}
 
 class SessionEngine {
  public:

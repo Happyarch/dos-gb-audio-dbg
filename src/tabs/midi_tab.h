@@ -54,6 +54,10 @@ class MidiTab : public DeviceTab {
   static void drawNoteBar(ImDrawList* dl, ImVec2 origin, float width,
                           float row_h, int velocity, bool sounding);
 
+  // MUNT-QT musical keyboard pitch scale bar showing active sounding notes.
+  static void drawPitchScale(ImDrawList* dl, ImVec2 origin, ImVec2 size,
+                             MidiDevice* dev, int ch);
+
   // --- Backend hook (pure virtual: patch-name set differs per device) ---
   // MT-32 returns Timbre names, GM returns General MIDI program names.
   virtual const char* programName(int program) const = 0;

@@ -63,6 +63,7 @@ class GmDevice : public MidiDevice {
   void dispatchNoteOff(int ch, int note) override;
 
   // --- Synth-reaching program/CC (update base + forward) ---
+  void programChange(int ch, int program) override;
   void dispatchProgramChange(int ch, int program);
   void dispatchControlChange(int ch, int cc, int value);
 

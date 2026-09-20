@@ -178,11 +178,18 @@ struct SmfNoteOn {
   int vel = 0;
 };
 
+struct SmfProgChange {
+  std::uint32_t tick = 0;
+  int channel = 0;
+  std::uint8_t program = 0;
+};
+
 // Parses one track's events; appends note-ons (vel > 0), note-offs
-// (0x8x or 0x9x vel 0), and tempo map entries. Returns false on damage.
+// (0x8x or 0x9x vel 0), program changes, and tempo map entries. Returns false on damage.
 bool parseSmfTrack(SmfReader* r, std::size_t track_end,
                    std::vector<SmfNoteOn>* ons,
                    std::vector<SmfNoteOn>* offs,
+                   std::vector<SmfProgChange>* progs,
                    std::vector<std::pair<std::uint32_t, std::uint32_t> >* tempos) {
   std::uint32_t tick = 0;
   std::uint8_t running = 0;
@@ -223,10 +230,12 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end,
       const int ch = status & 0x0F;
       running = status;
       if (hi == 0xC0 || hi == 0xD0) {
-        if (data_byte >= 0) {
-          (void)data_byte;  // Already consumed as the single data byte.
-        } else {
-          r->skip(1);
+        const std::uint8_t d1 = data_byte >= 0
+                                    ? static_cast<std::uint8_t>(data_byte)
+                                    : r->u8();
+        if (!r->ok()) return false;
+        if (hi == 0xC0 && progs != nullptr) {
+          progs->push_back({tick, ch, d1});
         }
       } else {
         const std::uint8_t d1 = data_byte >= 0
@@ -440,9 +449,13 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
     const std::string& song, const std::string& target) const {
   std::vector<SimNoteEvent> out;
   if (repo_root_.empty()) return out;
-  fs::path bridge = fs::path(repo_root_) / "dos_port" / "tools" / "viewer" /
-                    "src" / "enhancement_dump.py";
+  fs::path bridge = fs::path(repo_root_) / "dos_port" / "tools" /
+                    "dos-gb-audio-dbg" / "src" / "enhancement_dump.py";
   std::error_code ec;
+  if (!fs::is_regular_file(bridge, ec)) {
+    bridge = fs::path(repo_root_) / "dos_port" / "tools" / "viewer" /
+             "src" / "enhancement_dump.py";
+  }
   if (!fs::is_regular_file(bridge, ec)) return out;
   const std::string cmd = "python3 " + shellQuote(bridge.string()) + " " +
                           shellQuote(repo_root_) + " " + shellQuote(song) +
@@ -459,6 +472,19 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
     ls >> kind;
     if (kind == "OK") {
       saw_ok = true;
+    } else if (kind == "CH") {
+      int idx = 0, tier = 0, mc = 0, prog = -1;
+      float vol = 1.0f;
+      std::string name;
+      ls >> idx >> name >> tier >> mc >> prog >> vol;
+      if (!ls.fail() && mc >= 0 && mc < 16 && prog >= 0 && prog < 128) {
+        SimNoteEvent pcev;
+        pcev.frame = 0;
+        pcev.channel = static_cast<std::uint8_t>(mc);
+        pcev.note = static_cast<std::uint8_t>(prog);
+        pcev.type = SimEventType::ProgramChange;
+        out.push_back(pcev);
+      }
     } else if (kind == "NOTE") {
       std::uint32_t frame = 0;
       std::uint32_t dur = 0;
@@ -467,6 +493,7 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
       if (ls.fail() || ch < 0 || ch > 15 || key < 0 || key > 127) return;
       if (vel < 1) vel = 1;
       if (vel > 127) vel = 127;
+      if (dur == 0) dur = 1;
       SimNoteEvent on;
       on.frame = frame;
       on.channel = static_cast<std::uint8_t>(ch);
@@ -502,10 +529,7 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
     out.clear();
     return out;
   }
-  std::stable_sort(out.begin(), out.end(),
-                   [](const SimNoteEvent& a, const SimNoteEvent& b) {
-                     return a.frame < b.frame;
-                   });
+  std::stable_sort(out.begin(), out.end(), eventLess);
   return out;
 }
 
@@ -532,6 +556,7 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
   if (!r.ok()) return out;
 
   std::vector<SmfNoteOn> ons, offs;
+  std::vector<SmfProgChange> progs;
   std::vector<std::pair<std::uint32_t, std::uint32_t> > tempos;  // (tick, usec)
   for (std::uint16_t t = 0; t < ntracks; ++t) {
     if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'r' || r.u8() != 'k') {
@@ -540,9 +565,9 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     const std::uint32_t track_len = r.u32be();
     if (!r.ok()) return out;
     const std::size_t track_end = r.pos() + track_len;
-    if (!parseSmfTrack(&r, track_end, &ons, &offs, &tempos)) return out;
+    if (!parseSmfTrack(&r, track_end, &ons, &offs, &progs, &tempos)) return out;
   }
-  if (ons.empty()) return out;
+  if (ons.empty() && progs.empty()) return out;
 
   std::sort(tempos.begin(), tempos.end());
   auto tempoAt = [&](std::uint32_t tick) -> std::uint32_t {
@@ -563,6 +588,16 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
                           (1000000.0 * static_cast<double>(division));
     return static_cast<std::uint32_t>(frames + 0.5);
   };
+
+  // Dispatch Program Changes.
+  for (const auto& pc : progs) {
+    SimNoteEvent pcev;
+    pcev.frame = tickToFrame(pc.tick);
+    pcev.channel = static_cast<std::uint8_t>(pc.channel);
+    pcev.note = pc.program;
+    pcev.type = SimEventType::ProgramChange;
+    out.push_back(pcev);
+  }
 
   // Match offs to ons in tick order: index offs per (channel, key).
   std::map<std::uint32_t, std::vector<std::size_t> > off_index;
@@ -598,7 +633,10 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
       }
     }
     const std::uint32_t frame = tickToFrame(on.tick);
-    const std::uint32_t off_frame = tickToFrame(off_tick);
+    std::uint32_t off_frame = tickToFrame(off_tick);
+    if (off_frame <= frame) {
+      off_frame = frame + 1;
+    }
     SimNoteEvent ev_on;
     ev_on.frame = frame;
     ev_on.channel = static_cast<std::uint8_t>(on.channel);
@@ -606,7 +644,7 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     int vel = on.vel < 1 ? 1 : (on.vel > 127 ? 127 : on.vel);
     ev_on.velocity = static_cast<std::uint8_t>(vel);
     const std::uint32_t dur =
-        off_frame > frame ? off_frame - frame : 0;
+        off_frame > frame ? off_frame - frame : 1;
     ev_on.duration_frames =
         static_cast<std::uint16_t>(dur > 0xFFFF ? 0xFFFF : dur);
     ev_on.is_note_on = true;
@@ -620,10 +658,7 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     ev_off.is_note_on = false;
     out.push_back(ev_off);
   }
-  std::stable_sort(out.begin(), out.end(),
-                   [](const SimNoteEvent& a, const SimNoteEvent& b) {
-                     return a.frame < b.frame;
-                   });
+  std::stable_sort(out.begin(), out.end(), eventLess);
   return out;
 }
 

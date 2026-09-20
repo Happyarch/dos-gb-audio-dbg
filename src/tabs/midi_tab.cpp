@@ -22,6 +22,60 @@ void MidiTab::drawNoteBar(ImDrawList* dl, ImVec2 origin, float width,
   dl->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + row_h), col);
 }
 
+void MidiTab::drawPitchScale(ImDrawList* dl, ImVec2 origin, ImVec2 size,
+                            MidiDevice* dev, int ch) {
+  if (dl == nullptr || size.x <= 0.0f || size.y <= 0.0f) return;
+
+  const ImU32 bg_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.18f, 0.18f, 0.20f, 1.0f));
+  const ImU32 border_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.28f, 0.28f, 0.30f, 1.0f));
+  const ImU32 tick_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.32f, 0.32f, 0.35f, 1.0f));
+
+  dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), bg_col,
+                    2.0f);
+  dl->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), border_col,
+              2.0f);
+
+  // Standard piano range: A0 (21) to C8 (108).
+  constexpr int kMinNote = 21;
+  constexpr int kMaxNote = 108;
+  constexpr int kRange = kMaxNote - kMinNote;
+
+  // Draw octave ticks for C keys (24, 36, 48, 60, 72, 84, 96, 108).
+  for (int n = 24; n <= 108; n += 12) {
+    const float x = origin.x +
+                    (static_cast<float>(n - kMinNote) /
+                     static_cast<float>(kRange)) *
+                        size.x;
+    dl->AddLine(ImVec2(x, origin.y + 1), ImVec2(x, origin.y + size.y - 1),
+                tick_col, 1.0f);
+  }
+
+  if (dev == nullptr || ch < 0 || ch >= dev->channelCount()) return;
+
+  // Draw active sounding notes as markers on the scale.
+  constexpr float kMarkerW = 4.0f;
+  for (int note = 0; note < MidiDevice::kNotesPerChannel; ++note) {
+    if (dev->isNoteSounding(ch, note)) {
+      int clamped = note;
+      if (clamped < kMinNote) clamped = kMinNote;
+      if (clamped > kMaxNote) clamped = kMaxNote;
+      const float frac = static_cast<float>(clamped - kMinNote) /
+                         static_cast<float>(kRange);
+      const float mx = origin.x + frac * (size.x - kMarkerW);
+      const int vel = dev->noteVelocity(ch, note);
+      const float alpha = 0.65f + 0.35f * (static_cast<float>(vel) / 127.0f);
+      const ImU32 marker_col = ImGui::ColorConvertFloat4ToU32(
+          ImVec4(0.98f, 0.45f, 0.12f, alpha));
+      dl->AddRectFilled(ImVec2(mx, origin.y + 1.0f),
+                        ImVec2(mx + kMarkerW, origin.y + size.y - 1.0f),
+                        marker_col, 1.0f);
+    }
+  }
+}
+
 MidiTab::StripState MidiTab::stripState(const DeviceSnapshot& s, int ch) const {
   StripState st;
   if (ch < 0 || static_cast<std::size_t>(ch) >= s.channels.size()) return st;
@@ -39,9 +93,8 @@ MidiTab::StripState MidiTab::stripState(const DeviceSnapshot& s, int ch) const {
 
 void MidiTab::drawChannelStrips(const DeviceSnapshot& s) {
   if (ImGui::GetCurrentContext() == nullptr) return;
-  // MUNT-QT style strips: one row per MIDI channel with mute toggle,
-  // patch name, and active-note count. Dormant channels take the fast
-  // escape (label only, no bar work).
+  // MUNT-QT style strips: LED, label, mute toggle, patch name,
+  // keyboard pitch scale, and peak meter.
   for (std::size_t i = 0; i < s.channels.size(); ++i) {
     const int ch = static_cast<int>(i);
     const ChannelState& c = s.channels[i];
@@ -50,14 +103,29 @@ void MidiTab::drawChannelStrips(const DeviceSnapshot& s) {
       continue;
     }
     const StripState st = stripState(s, ch);
-    int prog = (device_ != nullptr) ? device_->program(ch) : 0;
-    ImGui::Text("CH%02d %s %s", ch, programName(prog),
-                st.audible ? "on" : "muted");
+    const int prog = (device_ != nullptr) ? device_->program(ch) : 0;
+    if (st.active_notes > 0) {
+      ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.2f, 1.0f), "[o]");
+    } else {
+      ImGui::TextDisabled("[.]");
+    }
     ImGui::SameLine();
+    ImGui::Text("CH%02d", ch);
+    ImGui::SameLine();
+    if (c.muted) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.2f, 0.1f, 1.0f));
     if (ImGui::SmallButton(muteLabel(c.muted))) onMuteClick(ch);
+    if (c.muted) ImGui::PopStyleColor();
     ImGui::SameLine();
-    ImGui::Text("notes=%lu peak=%.2f", static_cast<unsigned long>(st.active_notes),
-                st.peak);
+    ImGui::Text("%-16s", programName(prog));
+    ImGui::SameLine();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    constexpr float kBarW = 240.0f;
+    constexpr float kBarH = 16.0f;
+    drawPitchScale(dl, origin, ImVec2(kBarW, kBarH), device_, ch);
+    ImGui::Dummy(ImVec2(kBarW, kBarH));
+    ImGui::SameLine();
+    ImGui::ProgressBar(st.peak, ImVec2(70.0f, 0.0f));
   }
 }
 
@@ -67,20 +135,25 @@ void MidiTab::drawDetail(const DeviceSnapshot& s) {
     ImGui::TextDisabled("No MIDI device attached.");
     return;
   }
-  // Persistent piano-roll bars from the device note history.
-  const std::vector<MidiNoteEvent>& hist = device_->noteHistory();
-  ImGui::Text("Note history: %lu events", static_cast<unsigned long>(hist.size()));
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  const ImVec2 origin = ImGui::GetCursorScreenPos();
-  constexpr float kRowH = 4.0f;
-  for (std::size_t i = 0; i < hist.size() && i < 64; ++i) {
-    const MidiNoteEvent& ev = hist[i];
-    const float y = origin.y + static_cast<float>(i) * (kRowH + 1.0f);
-    const float w = 2.0f + static_cast<float>(ev.velocity);
-    drawNoteBar(dl, ImVec2(origin.x, y), w, kRowH, ev.velocity, ev.sounding);
+  ImGui::Text("Channel Status Overview (Active Notes & Programs):");
+  ImGui::Separator();
+  for (int ch = 0; ch < device_->channelCount(); ++ch) {
+    if (device_->isDormant(ch)) continue;
+    const StripState st = stripState(s, ch);
+    const int prog = device_->program(ch);
+    std::string sounding_notes;
+    for (int note = 0; note < MidiDevice::kNotesPerChannel; ++note) {
+      if (device_->isNoteSounding(ch, note)) {
+        if (!sounding_notes.empty()) sounding_notes += ", ";
+        sounding_notes += std::to_string(note);
+      }
+    }
+    ImGui::Text("CH%02d [%s]: %s | notes=%lu (%s) | peak=%.2f", ch,
+                st.audible ? "ON" : "MUTED", programName(prog),
+                static_cast<unsigned long>(st.active_notes),
+                sounding_notes.empty() ? "-" : sounding_notes.c_str(),
+                st.peak);
   }
-  ImGui::Dummy(ImVec2(200.0f, 64.0f * (kRowH + 1.0f)));
-  (void)s;
 }
 
 void MidiTab::drawTracker(const DeviceSnapshot& s, const SimState* sim) {

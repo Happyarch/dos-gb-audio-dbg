@@ -565,26 +565,31 @@ std::size_t GbApuDevice::drainApu(GbVoiceApu* apu, float* out,
                                   std::size_t max_frames) {
   if (apu == nullptr || out == nullptr || max_frames == 0) return 0;
   std::size_t done = 0;
-  // One end_frame yields ~sample_rate/60 mono frames; loop for large asks.
   while (done < max_frames) {
-    apu->end_frame();
     long avail = apu->samples_avail();  // Total int16 stereo samples.
-    if (avail <= 0) break;
-    std::vector<blip_sample_t> tmp(static_cast<std::size_t>(avail));
-    const long got = apu->read_samples(tmp.data(), avail);
+    if (avail < 2) {
+      apu->end_frame();
+      avail = apu->samples_avail();
+      if (avail < 2) break;
+    }
+    const std::size_t needed_mono = max_frames - done;
+    const std::size_t needed_stereo = needed_mono * 2;
+    const long to_read = static_cast<long>(
+        std::min(static_cast<std::size_t>(avail), needed_stereo)) & ~1L;
+    if (to_read <= 0) break;
+
+    blip_sample_t tmp[512];
+    const long chunk = std::min(to_read, 512L);
+    const long got = apu->read_samples(tmp, chunk);
     if (got <= 0) break;
-    const std::size_t mono_avail = static_cast<std::size_t>(got) / 2;
-    for (std::size_t i = 0; i < mono_avail && done < max_frames; ++i) {
+    const std::size_t mono_got = static_cast<std::size_t>(got) / 2;
+    for (std::size_t i = 0; i < mono_got; ++i) {
       const float l =
           static_cast<float>(tmp[i * 2]) / 32768.0f;
-      float r = l;
-      if (i * 2 + 1 < static_cast<std::size_t>(got)) {
-        r = static_cast<float>(tmp[i * 2 + 1]) / 32768.0f;
-      }
+      const float r =
+          static_cast<float>(tmp[i * 2 + 1]) / 32768.0f;
       out[done++] = (l + r) * 0.5f;
     }
-    // If the APU produced less than asked, loop for another frame.
-    if (mono_avail == 0) break;
   }
   return done;
 }
@@ -617,7 +622,12 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
       // Drain-and-discard keeps the shadow's Blip_Buffer from growing
       // without bound between master-only renders.
       float discard[64];
-      drainApu(shadows_[c], discard, 64);
+      std::size_t rem = frames;
+      while (rem > 0) {
+        std::size_t step = std::min(rem, std::size_t(64));
+        drainApu(shadows_[c], discard, step);
+        rem -= step;
+      }
     }
   } else {
     std::memset(buf, 0, frames * sizeof(float));
@@ -637,7 +647,12 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
     }
     // Keep the master clocked so a later unmuted render stays continuous.
     float discard[64];
-    drainApu(master_, discard, 64);
+    std::size_t rem = frames;
+    while (rem > 0) {
+      std::size_t step = std::min(rem, std::size_t(64));
+      drainApu(master_, discard, step);
+      rem -= step;
+    }
   }
   float peak = 0.0f;
   for (std::size_t i = 0; i < frames; ++i) {
@@ -667,8 +682,13 @@ void GbApuDevice::renderPerChannel(float** bufs, std::size_t frames) {
     if (!channelAudible(c)) {
       std::memset(out, 0, frames * sizeof(float));
       // Still step the shadow so unmuting resumes in sync.
-      float discard[16];
-      drainApu(shadows_[c], discard, 16);
+      float discard[64];
+      std::size_t rem = frames;
+      while (rem > 0) {
+        std::size_t step = std::min(rem, std::size_t(64));
+        drainApu(shadows_[c], discard, step);
+        rem -= step;
+      }
       continue;
     }
     const std::size_t got = drainApu(shadows_[c], out, frames);

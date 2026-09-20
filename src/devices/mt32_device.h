@@ -91,6 +91,7 @@ class Mt32Device : public MidiDevice {
   void dispatchNoteOff(int ch, int note) override;
 
   // --- Synth-reaching program/CC/SysEx (update base + forward) ---
+  void programChange(int ch, int program) override;
   void dispatchProgramChange(int ch, int program);
   void dispatchControlChange(int ch, int cc, int value);
   void dispatchSysEx(const std::uint8_t* data, std::size_t len);

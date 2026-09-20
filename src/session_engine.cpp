@@ -17,10 +17,6 @@ namespace {
 constexpr std::uint8_t kNoteOnOpcode = 0x90;
 constexpr std::uint8_t kNoteOffOpcode = 0x80;
 
-bool eventLess(const SimNoteEvent& a, const SimNoteEvent& b) {
-  return a.frame < b.frame;
-}
-
 }  // namespace
 
 SessionEngine::SessionEngine() = default;
@@ -171,14 +167,23 @@ void SessionEngine::clearEvents() {
 
 void SessionEngine::dispatch(const SimNoteEvent& ev) {
   if (active_device_ == nullptr) return;
-  // MIDI backends get real note dispatch (with pre-synth mute filtering);
-  // every other backend gets a note packet via the command channel.
+  // MIDI backends get real note & program change dispatch;
+  // other backends receive command packets.
   if (MidiDevice* midi = dynamic_cast<MidiDevice*>(active_device_)) {
+    if (ev.type == SimEventType::ProgramChange) {
+      midi->programChange(ev.channel, ev.note);
+      return;
+    }
     if (ev.is_note_on) {
       midi->noteOn(ev.channel, ev.note, ev.velocity);
     } else {
       midi->noteOff(ev.channel, ev.note);
     }
+    return;
+  }
+  if (ev.type == SimEventType::ProgramChange) {
+    const std::uint8_t payload[2] = {ev.channel, ev.note};
+    active_device_->handleCommand(0xC0, payload, sizeof(payload));
     return;
   }
   if (ev.is_note_on) {

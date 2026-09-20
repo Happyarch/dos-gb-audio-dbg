@@ -19,9 +19,11 @@ MidiDevice::MidiDevice(int device_id, std::string device_name, int channels)
   const std::size_t n = static_cast<std::size_t>(channelCount());
   velocities_.assign(n, {});
   sounding_.assign(n, {});
+  note_counts_.assign(n, {});
   for (std::size_t i = 0; i < n; ++i) {
     velocities_[i].fill(0);
     sounding_[i].fill(false);
+    note_counts_[i].fill(0);
   }
   programs_.assign(n, 0);
   pitch_bends_.assign(n, kPitchCentre);
@@ -75,9 +77,13 @@ bool MidiDevice::noteOn(int ch, int note, int velocity) {
     ev.sounding = false;
     ev.start_frame = frame();
     ev.end_frame = frame();
+    if (note_history_.size() >= 512) {
+      note_history_.erase(note_history_.begin(), note_history_.begin() + 128);
+    }
     note_history_.push_back(ev);
     return false;
   }
+  ++note_counts_[c][n];
   velocities_[c][n] = velocity;
   sounding_[c][n] = true;
   MidiNoteEvent ev;
@@ -87,6 +93,9 @@ bool MidiDevice::noteOn(int ch, int note, int velocity) {
   ev.sounding = true;
   ev.start_frame = frame();
   ev.end_frame = frame();
+  if (note_history_.size() >= 512) {
+    note_history_.erase(note_history_.begin(), note_history_.begin() + 128);
+  }
   note_history_.push_back(ev);
   dispatchNoteOn(ch, note, velocity);
   return true;
@@ -97,8 +106,14 @@ void MidiDevice::noteOff(int ch, int note) {
   wakeChannel(ch);
   const std::size_t c = static_cast<std::size_t>(ch);
   const std::size_t n = static_cast<std::size_t>(note);
-  velocities_[c][n] = 0;
-  sounding_[c][n] = false;
+  if (note_counts_[c][n] > 0) {
+    --note_counts_[c][n];
+  }
+  // Only turn off the voice when no overlapping note-on remains active.
+  if (note_counts_[c][n] == 0) {
+    velocities_[c][n] = 0;
+    sounding_[c][n] = false;
+  }
   // Close the newest open bar for this (ch, note).
   for (std::size_t i = note_history_.size(); i-- > 0;) {
     MidiNoteEvent& ev = note_history_[i];
@@ -109,7 +124,9 @@ void MidiDevice::noteOff(int ch, int note) {
       break;
     }
   }
-  dispatchNoteOff(ch, note);
+  if (note_counts_[c][n] == 0) {
+    dispatchNoteOff(ch, note);
+  }
 }
 
 bool MidiDevice::isNoteSounding(int ch, int note) const {
@@ -136,11 +153,17 @@ void MidiDevice::allNotesOff() {
   for (int ch = 0; ch < channelCount(); ++ch) {
     for (int note = 0; note < kNotesPerChannel; ++note) {
       if (sounding_[static_cast<std::size_t>(ch)]
-                  [static_cast<std::size_t>(note)]) {
+                   [static_cast<std::size_t>(note)]) {
+        note_counts_[static_cast<std::size_t>(ch)]
+                    [static_cast<std::size_t>(note)] = 1;
         noteOff(ch, note);
       }
     }
   }
+}
+
+void MidiDevice::programChange(int ch, int program) {
+  setProgram(ch, program);
 }
 
 void MidiDevice::setProgram(int ch, int program) {

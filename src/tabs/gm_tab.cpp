@@ -93,11 +93,10 @@ void GmTab::drawChannelStrips(const DeviceSnapshot& s) {
     if (ImGui::SmallButton("[S]")) onSoloClick(ch);
     if (cs.soloed) ImGui::PopStyleColor();
     ImGui::SameLine();
-    ImGui::Text("%s", programName(cs.program));
-    ImGui::SameLine();
     // Program selector combo (128 GM programs).
     char combo_id[32];
     std::snprintf(combo_id, sizeof(combo_id), "##gmprog%d", ch);
+    ImGui::SetNextItemWidth(140.0f);
     if (ImGui::BeginCombo(combo_id, programName(cs.program))) {
       for (int p = 0; p < 128; ++p) {
         const bool selected = (p == cs.program);
@@ -109,29 +108,18 @@ void GmTab::drawChannelStrips(const DeviceSnapshot& s) {
       ImGui::EndCombo();
     }
     ImGui::SameLine();
-    // Volume & pan readouts (CC7 / CC10).
-    ImGui::Text("vol=%.2f pan=%+.2f", cs.volume, cs.pan);
+    // Musical keyboard pitch scale bar showing active sounding notes.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    constexpr float kBarW = 240.0f;
+    constexpr float kBarH = 16.0f;
+    drawPitchScale(dl, origin, ImVec2(kBarW, kBarH), gm_, ch);
+    ImGui::Dummy(ImVec2(kBarW, kBarH));
     ImGui::SameLine();
-    // Persistent piano-roll bar: most recent note on this channel.
-    const std::vector<MidiNoteEvent>& hist = gm_->noteHistory();
-    int last_vel = 0;
-    bool last_sounding = false;
-    for (std::size_t i = hist.size(); i-- > 0;) {
-      if (hist[i].channel == ch) {
-        last_vel = hist[i].velocity;
-        last_sounding = hist[i].sounding;
-        break;
-      }
-    }
-    if (last_vel > 0) {
-      ImDrawList* dl = ImGui::GetWindowDrawList();
-      const ImVec2 origin = ImGui::GetCursorScreenPos();
-      drawNoteBar(dl, origin, 4.0f + static_cast<float>(last_vel), 8.0f,
-                  last_vel, last_sounding);
-      ImGui::Dummy(ImVec2(4.0f + static_cast<float>(last_vel), 8.0f));
-      ImGui::SameLine();
-    }
-    ImGui::ProgressBar(cs.peak, ImVec2(80.0f, 0.0f));
+    // Volume & pan readouts (CC7 / CC10).
+    ImGui::Text("v:%.2f p:%+.2f", cs.volume, cs.pan);
+    ImGui::SameLine();
+    ImGui::ProgressBar(cs.peak, ImVec2(60.0f, 0.0f));
   }
 }
 
@@ -141,26 +129,23 @@ void GmTab::drawDetail(const DeviceSnapshot& s) {
     ImGui::TextDisabled("No GM device attached.");
     return;
   }
-  // Note history summary plus per-channel volume/pan table.
-  const std::vector<MidiNoteEvent>& hist = gm_->noteHistory();
-  ImGui::Text("Note history: %lu events",
-              static_cast<unsigned long>(hist.size()));
-  ImDrawList* dl = ImGui::GetWindowDrawList();
-  const ImVec2 origin = ImGui::GetCursorScreenPos();
-  constexpr float kRowH = 4.0f;
-  for (std::size_t i = 0; i < hist.size() && i < 64; ++i) {
-    const MidiNoteEvent& ev = hist[i];
-    const float y = origin.y + static_cast<float>(i) * (kRowH + 1.0f);
-    const float w = 2.0f + static_cast<float>(ev.velocity);
-    drawNoteBar(dl, ImVec2(origin.x, y), w, kRowH, ev.velocity, ev.sounding);
-  }
-  ImGui::Dummy(ImVec2(200.0f, 64.0f * (kRowH + 1.0f)));
+  ImGui::Text("GM Channel Telemetry & Routing:");
+  ImGui::Separator();
   for (int ch = 0; ch < kChannels; ++ch) {
     const ChannelStrip cs = channelStrip(s, ch);
     if (cs.dormant) continue;
-    ImGui::Text("%s prog=%d vol=%.2f pan=%+.2f notes=%lu", channelLabel(ch).c_str(),
-                cs.program, cs.volume, cs.pan,
-                static_cast<unsigned long>(cs.sounding));
+    std::string sounding_notes;
+    for (int note = 0; note < MidiDevice::kNotesPerChannel; ++note) {
+      if (gm_->isNoteSounding(ch, note)) {
+        if (!sounding_notes.empty()) sounding_notes += ", ";
+        sounding_notes += std::to_string(note);
+      }
+    }
+    ImGui::Text("%-16s | %-20s | vol=%.2f pan=%+.2f | notes=%lu (%s) | peak=%.2f",
+                channelLabel(ch).c_str(), programName(cs.program),
+                cs.volume, cs.pan, static_cast<unsigned long>(cs.sounding),
+                sounding_notes.empty() ? "-" : sounding_notes.c_str(),
+                cs.peak);
   }
 }
 

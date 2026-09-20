@@ -188,6 +188,10 @@ void GmDevice::dispatchNoteOff(int ch, int note) {
   fluid_synth_noteoff(synth_, ch, note);
 }
 
+void GmDevice::programChange(int ch, int program) {
+  dispatchProgramChange(ch, program);
+}
+
 void GmDevice::dispatchProgramChange(int ch, int program) {
   if (!chInRange(ch)) return;
   setProgram(ch, program);

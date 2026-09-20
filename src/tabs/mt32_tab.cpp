@@ -147,11 +147,10 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
     if (muted) ImGui::PopStyleColor();
     ImGui::SameLine();
     const int prog = mt32_->program(ps.channel);
-    ImGui::Text("%s", programName(prog));
-    ImGui::SameLine();
     // Timbre selector combo (128 factory timbres).
     char combo_id[32];
     std::snprintf(combo_id, sizeof(combo_id), "##mt32prog%d", part);
+    ImGui::SetNextItemWidth(140.0f);
     if (ImGui::BeginCombo(combo_id, programName(prog))) {
       for (int p = 0; p < 128; ++p) {
         const bool selected = (p == prog);
@@ -163,28 +162,16 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
       ImGui::EndCombo();
     }
     ImGui::SameLine();
-    // Persistent piano-roll note bar: most recent sounding note on this
-    // part's channel, velocity-graded via drawNoteBar().
-    const std::vector<MidiNoteEvent>& hist = mt32_->noteHistory();
-    int last_vel = 0;
-    bool last_sounding = false;
-    for (std::size_t i = hist.size(); i-- > 0;) {
-      if (hist[i].channel == ps.channel) {
-        last_vel = hist[i].velocity;
-        last_sounding = hist[i].sounding;
-        break;
-      }
-    }
-    if (last_vel > 0) {
-      ImDrawList* dl = ImGui::GetWindowDrawList();
-      const ImVec2 origin = ImGui::GetCursorScreenPos();
-      drawNoteBar(dl, origin, 4.0f + static_cast<float>(last_vel), 8.0f,
-                  last_vel, last_sounding);
-      ImGui::Dummy(ImVec2(4.0f + static_cast<float>(last_vel), 8.0f));
-      ImGui::SameLine();
-    }
+    // Musical keyboard pitch scale bar showing active sounding notes.
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    constexpr float kBarW = 240.0f;
+    constexpr float kBarH = 16.0f;
+    drawPitchScale(dl, origin, ImVec2(kBarW, kBarH), mt32_, ps.channel);
+    ImGui::Dummy(ImVec2(kBarW, kBarH));
+    ImGui::SameLine();
     // Peak level meter.
-    ImGui::ProgressBar(ps.peak, ImVec2(80.0f, 0.0f));
+    ImGui::ProgressBar(ps.peak, ImVec2(70.0f, 0.0f));
   }
 }
 

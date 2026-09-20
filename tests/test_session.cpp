@@ -412,6 +412,7 @@ int main() {
     std::uint32_t prev = 0;
     bool first = true;
     for (const SimNoteEvent& e : base) {
+      if (e.type == SimEventType::ProgramChange) continue;
       if (e.is_note_on) {
         ++ons;
         CHECK(e.velocity >= 1 && e.velocity <= 127);
@@ -489,6 +490,8 @@ int main() {
     while (eng.isPlaying()) eng.tick();
     CHECK(midi.dispatched_ons == static_cast<int>(ons));
     CHECK(midi.dispatched_offs == static_cast<int>(offs));
+    CHECK(midi.program(1) == 72);
+    CHECK(midi.program(2) == 50);
     CHECK(eng.currentFrame() == max_frame + 1);
     CHECK(eng.isStopped());
     midi.shutdown();
@@ -511,6 +514,7 @@ int main() {
     std::uint32_t prev = 0;
     bool first = true;
     for (const SimNoteEvent& e : enh) {
+      if (e.type == SimEventType::ProgramChange) continue;
       if (e.is_note_on) {
         ++ons;
       } else {

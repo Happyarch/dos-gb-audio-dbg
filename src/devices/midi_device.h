@@ -65,6 +65,7 @@ class MidiDevice : public SoundDevice {
   void allNotesOff();
 
   // --- Program / pitch / CC (concrete, wake on write) ---
+  virtual void programChange(int ch, int program);
   void setProgram(int ch, int program);
   int program(int ch) const;
   void setPitchBend(int ch, int value);  // 0..16383, 8192 = centre.
@@ -105,6 +106,7 @@ class MidiDevice : public SoundDevice {
  private:
   std::vector<std::array<int, kNotesPerChannel> > velocities_;
   std::vector<std::array<bool, kNotesPerChannel> > sounding_;
+  std::vector<std::array<int, kNotesPerChannel> > note_counts_;
   std::vector<int> programs_;
   std::vector<int> pitch_bends_;
   std::vector<std::array<int, 128> > ccs_;

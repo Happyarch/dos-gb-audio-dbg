@@ -247,6 +247,10 @@ void Mt32Device::dispatchNoteOff(int ch, int note) {
   synth_->playMsgNow(msg);
 }
 
+void Mt32Device::programChange(int ch, int program) {
+  dispatchProgramChange(ch, program);
+}
+
 void Mt32Device::dispatchProgramChange(int ch, int program) {
   if (!chInRange(ch)) return;
   setProgram(ch, program);
