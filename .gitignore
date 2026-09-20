@@ -1,0 +1,12 @@
+# Stage 1 scaffold: out-of-source CMake build directory.
+build/
+
+# CTest test output
+Testing/
+
+# Third-party dependencies (fetched or local)
+third_party/
+
+# Test audio artifacts & logs
+*.wav
+*.audiolog

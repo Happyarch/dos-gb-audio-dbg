@@ -1,0 +1,645 @@
+// Stage 5.3: EnhancementManager implementation. See enhancement_manager.h.
+
+#include "enhancement_manager.h"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace audio_dbg {
+namespace {
+
+namespace fs = std::filesystem;
+
+constexpr const char* kConstantsFile = "constants/music_constants.asm";
+
+// Same walk-up as SongCatalog: $PKMN_REPO_ROOT wins, else walk up to 12
+// levels looking for constants/music_constants.asm.
+std::string findRepoRoot() {
+  if (const char* env = std::getenv("PKMN_REPO_ROOT")) {
+    std::error_code ec;
+    if (fs::is_regular_file(fs::path(env) / kConstantsFile, ec)) return env;
+  }
+  std::error_code ec;
+  fs::path dir = fs::current_path(ec);
+  if (ec) return "";
+  for (int i = 0; i < 12; ++i) {
+    if (fs::is_regular_file(dir / kConstantsFile, ec)) {
+      return dir.string();
+    }
+    if (!dir.has_parent_path()) break;
+    dir = dir.parent_path();
+  }
+  return "";
+}
+
+std::string readWholeFile(const std::string& path, bool* ok) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in.is_open()) {
+    if (ok != nullptr) *ok = false;
+    return "";
+  }
+  std::ostringstream ss;
+  ss << in.rdbuf();
+  if (ok != nullptr) *ok = true;
+  return ss.str();
+}
+
+// Single-quote a shell argument (repo paths contain spaces; embedded
+// single quotes use the close-quote / escaped-quote / reopen idiom).
+std::string shellQuote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'') {
+      out += "'\\''";
+    } else {
+      out += c;
+    }
+  }
+  out += "'";
+  return out;
+}
+
+std::string sanitizeNote(const std::string& note) {
+  std::string out;
+  for (char c : note) {
+    const auto uc = static_cast<unsigned char>(c);
+    if (std::isalnum(uc) != 0 || c == '-' || c == '_') out += c;
+  }
+  if (out.size() > 32) out.resize(32);
+  return out;
+}
+
+std::string nowStamp() {
+  std::time_t t = std::time(nullptr);
+  std::tm tm_buf{};
+#if defined(_WIN32)
+  localtime_s(&tm_buf, &t);
+#else
+  localtime_r(&t, &tm_buf);
+#endif
+  char buf[32];
+  std::strftime(buf, sizeof(buf), "%Y%m%d_%H%M%S", &tm_buf);
+  return buf;
+}
+
+std::string zeroPad4(int id) {
+  char buf[16];
+  std::snprintf(buf, sizeof(buf), "%04d", id);
+  return buf;
+}
+
+// Parses "<id>_<ts>[_<note>].yaml" stems like revisions.py:
+// id = parts[0] (digits), ts = parts[1]. Returns false when malformed.
+bool parseRevisionStem(const std::string& stem, int* id, std::string* ts) {
+  const std::size_t u1 = stem.find('_');
+  if (u1 == std::string::npos || u1 == 0) return false;
+  const std::string id_part = stem.substr(0, u1);
+  for (char c : id_part) {
+    if (std::isdigit(static_cast<unsigned char>(c)) == 0) return false;
+  }
+  const std::string rest = stem.substr(u1 + 1);
+  const std::size_t u2 = rest.find('_');
+  const std::string ts_part = (u2 == std::string::npos) ? rest : rest.substr(0, u2);
+  if (ts_part.empty()) return false;
+  if (id != nullptr) *id = std::stoi(id_part);
+  if (ts != nullptr) *ts = ts_part;
+  return true;
+}
+
+// --- Minimal SMF reader (stdlib only) ------------------------------------
+
+class SmfReader {
+ public:
+  SmfReader(const std::uint8_t* data, std::size_t len)
+      : p_(data), n_(len), pos_(0), ok_(data != nullptr) {}
+
+  bool ok() const { return ok_; }
+  std::uint8_t u8() {
+    if (pos_ >= n_) {
+      ok_ = false;
+      return 0;
+    }
+    return p_[pos_++];
+  }
+  std::uint16_t u16be() {
+    const std::uint8_t hi = u8();
+    const std::uint8_t lo = u8();
+    return static_cast<std::uint16_t>((hi << 8) | lo);
+  }
+  std::uint32_t u32be() {
+    std::uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) v = (v << 8) | u8();
+    return v;
+  }
+  std::uint32_t vlq() {
+    std::uint32_t v = 0;
+    for (int i = 0; i < 4; ++i) {
+      const std::uint8_t b = u8();
+      if (!ok_) return 0;
+      v = (v << 7) | (b & 0x7F);
+      if ((b & 0x80) == 0) return v;
+    }
+    ok_ = false;  // Overlong VLQ.
+    return 0;
+  }
+  void skip(std::size_t k) {
+    if (pos_ + k > n_) {
+      ok_ = false;
+      pos_ = n_;
+      return;
+    }
+    pos_ += k;
+  }
+  std::size_t pos() const { return pos_; }
+
+ private:
+  const std::uint8_t* p_;
+  std::size_t n_;
+  std::size_t pos_;
+  bool ok_;
+};
+
+struct SmfNoteOn {
+  std::uint32_t tick = 0;
+  int channel = 0;
+  int key = 0;
+  int vel = 0;
+};
+
+// Parses one track's events; appends note-ons (vel > 0), note-offs
+// (0x8x or 0x9x vel 0), and tempo map entries. Returns false on damage.
+bool parseSmfTrack(SmfReader* r, std::size_t track_end,
+                   std::vector<SmfNoteOn>* ons,
+                   std::vector<SmfNoteOn>* offs,
+                   std::vector<std::pair<std::uint32_t, std::uint32_t> >* tempos) {
+  std::uint32_t tick = 0;
+  std::uint8_t running = 0;
+  while (r->pos() < track_end && r->ok()) {
+    tick += r->vlq();
+    if (!r->ok()) return false;
+    std::uint8_t status = r->u8();
+    if (!r->ok()) return false;
+    int data_byte = -1;  // First data byte, when running status applies.
+    if (status < 0x80) {
+      if (running == 0) return false;
+      data_byte = status;
+      status = running;
+    }
+    if (status == 0xFF) {
+      const std::uint8_t mtype = r->u8();
+      const std::uint32_t len = r->vlq();
+      if (!r->ok()) return false;
+      if (mtype == 0x51 && len == 3) {
+        const std::uint8_t b0 = r->u8();
+        const std::uint8_t b1 = r->u8();
+        const std::uint8_t b2 = r->u8();
+        const std::uint32_t tempo =
+            (static_cast<std::uint32_t>(b0) << 16) |
+            (static_cast<std::uint32_t>(b1) << 8) | b2;
+        if (tempo > 0) tempos->push_back({tick, tempo});
+      } else {
+        r->skip(len);
+      }
+      running = 0;
+    } else if (status == 0xF0 || status == 0xF7) {
+      const std::uint32_t len = r->vlq();
+      if (!r->ok()) return false;
+      r->skip(len);
+      running = 0;
+    } else {
+      const std::uint8_t hi = status & 0xF0;
+      const int ch = status & 0x0F;
+      running = status;
+      if (hi == 0xC0 || hi == 0xD0) {
+        if (data_byte >= 0) {
+          (void)data_byte;  // Already consumed as the single data byte.
+        } else {
+          r->skip(1);
+        }
+      } else {
+        const std::uint8_t d1 = data_byte >= 0
+                                    ? static_cast<std::uint8_t>(data_byte)
+                                    : r->u8();
+        const std::uint8_t d2 = r->u8();
+        if (!r->ok()) return false;
+        if (hi == 0x90 && d2 > 0) {
+          ons->push_back({tick, ch, d1, d2});
+        } else if (hi == 0x90 || hi == 0x80) {
+          offs->push_back({tick, ch, d1, 0});
+        }
+      }
+    }
+  }
+  return r->ok();
+}
+
+}  // namespace
+
+EnhancementManager::EnhancementManager()
+    : EnhancementManager(findRepoRoot()) {}
+
+EnhancementManager::EnhancementManager(const std::string& repo_root)
+    : repo_root_(repo_root) {
+  if (!repo_root_.empty()) {
+    enhance_dir_ = (fs::path(repo_root_) / "dos_port" / "tools" / "audio" /
+                    "enhancements")
+                       .string();
+    revisions_dir_ = (fs::path(repo_root_) / "dos_port" / "tools" / "audio" /
+                      ".revisions")
+                         .string();
+  }
+}
+
+EnhancementManager::EnhancementManager(const std::string& enhance_dir,
+                                       const std::string& revisions_dir,
+                                       const std::string& repo_root)
+    : enhance_dir_(enhance_dir),
+      revisions_dir_(revisions_dir),
+      repo_root_(repo_root) {}
+
+std::string EnhancementManager::revisionDirFor(const std::string& song) const {
+  return (fs::path(revisions_dir_) / song).string();
+}
+
+std::string EnhancementManager::yamlPathFor(const std::string& song) const {
+  return (fs::path(enhance_dir_) / (song + ".yaml")).string();
+}
+
+void EnhancementManager::watchSong(const std::string& song) {
+  watched_song_ = song;
+  refreshWatchCache();
+}
+
+std::string EnhancementManager::watchedPath() const {
+  if (watched_song_.empty() || enhance_dir_.empty()) return "";
+  return yamlPathFor(watched_song_);
+}
+
+void EnhancementManager::refreshWatchCache() {
+  watch_have_stamp_ = true;
+  watch_existed_ = false;
+  watch_mtime_ns_ = 0;
+  if (watched_song_.empty() || enhance_dir_.empty()) return;
+  std::error_code ec;
+  fs::path p = yamlPathFor(watched_song_);
+  watch_existed_ = fs::is_regular_file(p, ec);
+  if (watch_existed_) {
+    auto t = fs::last_write_time(p, ec);
+    if (!ec) {
+      watch_mtime_ns_ =
+          static_cast<std::uint64_t>(t.time_since_epoch().count());
+    }
+  }
+}
+
+bool EnhancementManager::pollForChanges() {
+  if (watched_song_.empty()) return false;
+  std::error_code ec;
+  fs::path p = yamlPathFor(watched_song_);
+  const bool existed = fs::is_regular_file(p, ec);
+  std::uint64_t mtime_ns = 0;
+  if (existed) {
+    auto t = fs::last_write_time(p, ec);
+    if (!ec) {
+      mtime_ns = static_cast<std::uint64_t>(t.time_since_epoch().count());
+    }
+  }
+  bool changed = false;
+  if (!watch_have_stamp_) {
+    changed = existed;  // First poll after construction: report a file.
+  } else if (existed != watch_existed_) {
+    changed = true;
+  } else if (existed && mtime_ns != watch_mtime_ns_) {
+    changed = true;
+  }
+  watch_have_stamp_ = true;
+  watch_existed_ = existed;
+  watch_mtime_ns_ = mtime_ns;
+  return changed;
+}
+
+std::pair<int, std::string> EnhancementManager::saveSnapshot(
+    const std::string& song, const std::string& content,
+    const std::string& note) {
+  std::error_code ec;
+  fs::create_directories(revisionDirFor(song), ec);
+  std::vector<RevisionEntry> revs = listRevisions(song);
+  if (!revs.empty()) {
+    bool same = false;
+    {
+      bool ok = false;
+      const std::string latest = readWholeFile(revs.back().path, &ok);
+      same = ok && latest == content;  // Byte-compare == hash-compare.
+    }
+    if (same) return {revs.back().id, revs.back().path};
+  }
+  const int next_id = revs.empty() ? 1 : revs.back().id + 1;
+  const std::string slug = sanitizeNote(note);
+  std::string filename =
+      zeroPad4(next_id) + "_" + nowStamp() + (slug.empty() ? "" : "_" + slug) + ".yaml";
+  fs::path out = fs::path(revisionDirFor(song)) / filename;
+  {
+    std::ofstream f(out, std::ios::binary | std::ios::trunc);
+    f << content;
+  }
+  return {next_id, out.string()};
+}
+
+std::vector<RevisionEntry> EnhancementManager::listRevisions(
+    const std::string& song) const {
+  std::vector<RevisionEntry> out;
+  std::error_code ec;
+  fs::path dir = revisionDirFor(song);
+  if (!fs::is_directory(dir, ec)) return out;
+  fs::directory_iterator it(dir, ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec)) continue;
+    fs::path p = it->path();
+    if (p.extension() != ".yaml") continue;
+    int id = 0;
+    std::string ts;
+    if (!parseRevisionStem(p.stem().string(), &id, &ts)) continue;
+    RevisionEntry e;
+    e.id = id;
+    e.timestamp = ts;
+    e.path = p.string();
+    out.push_back(e);
+  }
+  std::sort(out.begin(), out.end(),
+            [](const RevisionEntry& a, const RevisionEntry& b) {
+              return a.id < b.id;
+            });
+  return out;
+}
+
+std::pair<bool, std::string> EnhancementManager::getRevisionContent(
+    const std::string& song, int rev_id) const {
+  std::error_code ec;
+  fs::path dir = revisionDirFor(song);
+  if (!fs::is_directory(dir, ec)) return {false, ""};
+  const std::string prefix = zeroPad4(rev_id) + "_";
+  std::string best;
+  fs::directory_iterator it(dir, ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec)) continue;
+    fs::path p = it->path();
+    if (p.extension() != ".yaml") continue;
+    if (p.filename().string().rfind(prefix, 0) != 0) continue;
+    if (best.empty() || p.string() < best) best = p.string();
+  }
+  if (best.empty()) return {false, ""};
+  bool ok = false;
+  std::string content = readWholeFile(best, &ok);
+  if (!ok) return {false, ""};
+  return {true, content};
+}
+
+bool EnhancementManager::revertToRevision(const std::string& song, int rev_id) {
+  auto found = getRevisionContent(song, rev_id);
+  if (!found.first) return false;
+  std::error_code ec;
+  fs::create_directories(enhance_dir_, ec);
+  fs::path target = yamlPathFor(song);
+  // Locate the exact revision file again for a byte-exact copy.
+  const std::string prefix = zeroPad4(rev_id) + "_";
+  fs::directory_iterator it(revisionDirFor(song), ec), end;
+  for (; !ec && it != end; it.increment(ec)) {
+    if (!it->is_regular_file(ec)) continue;
+    fs::path p = it->path();
+    if (p.extension() != ".yaml") continue;
+    if (p.filename().string().rfind(prefix, 0) != 0) continue;
+    fs::copy_file(p, target, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+    if (song == watched_song_) refreshWatchCache();
+    return true;
+  }
+  return false;
+}
+
+std::pair<bool, std::string> EnhancementManager::loadYamlFile(
+    const std::string& song) const {
+  bool ok = false;
+  std::string content = readWholeFile(yamlPathFor(song), &ok);
+  if (!ok) return {false, ""};
+  return {true, content};
+}
+
+std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
+    const std::string& song, const std::string& target) const {
+  std::vector<SimNoteEvent> out;
+  if (repo_root_.empty()) return out;
+  fs::path bridge = fs::path(repo_root_) / "dos_port" / "tools" / "viewer" /
+                    "src" / "enhancement_dump.py";
+  std::error_code ec;
+  if (!fs::is_regular_file(bridge, ec)) return out;
+  const std::string cmd = "python3 " + shellQuote(bridge.string()) + " " +
+                          shellQuote(repo_root_) + " " + shellQuote(song) +
+                          " --target " + shellQuote(target) + " 2>/dev/null";
+  FILE* pipe = ::popen(cmd.c_str(), "r");
+  if (pipe == nullptr) return out;
+  bool saw_ok = false;
+  bool saw_end = false;
+  char buf[512];
+  std::string carry;
+  auto handleLine = [&](const std::string& line) {
+    std::istringstream ls(line);
+    std::string kind;
+    ls >> kind;
+    if (kind == "OK") {
+      saw_ok = true;
+    } else if (kind == "NOTE") {
+      std::uint32_t frame = 0;
+      std::uint32_t dur = 0;
+      int ch = 0, key = 0, vel = 0;
+      ls >> frame >> dur >> ch >> key >> vel;
+      if (ls.fail() || ch < 0 || ch > 15 || key < 0 || key > 127) return;
+      if (vel < 1) vel = 1;
+      if (vel > 127) vel = 127;
+      SimNoteEvent on;
+      on.frame = frame;
+      on.channel = static_cast<std::uint8_t>(ch);
+      on.note = static_cast<std::uint8_t>(key);
+      on.velocity = static_cast<std::uint8_t>(vel);
+      on.duration_frames = static_cast<std::uint16_t>(
+          dur > 0xFFFF ? 0xFFFF : dur);
+      on.is_note_on = true;
+      out.push_back(on);
+      SimNoteEvent off;
+      off.frame = frame + dur;
+      off.channel = on.channel;
+      off.note = on.note;
+      off.velocity = 0;
+      off.duration_frames = 0;
+      off.is_note_on = false;
+      out.push_back(off);
+    } else if (kind == "END") {
+      saw_end = true;
+    }
+  };
+  while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+    carry += buf;
+    std::size_t nl = 0;
+    while ((nl = carry.find('\n')) != std::string::npos) {
+      handleLine(carry.substr(0, nl));
+      carry.erase(0, nl + 1);
+    }
+  }
+  if (!carry.empty()) handleLine(carry);
+  ::pclose(pipe);
+  if (!saw_ok || !saw_end) {
+    out.clear();
+    return out;
+  }
+  std::stable_sort(out.begin(), out.end(),
+                   [](const SimNoteEvent& a, const SimNoteEvent& b) {
+                     return a.frame < b.frame;
+                   });
+  return out;
+}
+
+std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
+    const std::string& path) const {
+  std::vector<SimNoteEvent> out;
+  bool ok = false;
+  const std::string bytes = readWholeFile(path, &ok);
+  if (!ok || bytes.size() < 14) return out;
+  const auto* data = reinterpret_cast<const std::uint8_t*>(bytes.data());
+  SmfReader r(data, bytes.size());
+  if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'h' || r.u8() != 'd') {
+    return out;
+  }
+  const std::uint32_t header_len = r.u32be();
+  const std::uint16_t format = r.u16be();
+  const std::uint16_t ntracks = r.u16be();
+  const std::uint16_t division = r.u16be();
+  if (!r.ok() || (format != 0 && format != 1) || (division & 0x8000) != 0 ||
+      division == 0) {
+    return out;  // SMPTE divisions carry no tempo map; unsupported.
+  }
+  r.skip(header_len > 6 ? header_len - 6 : 0);
+  if (!r.ok()) return out;
+
+  std::vector<SmfNoteOn> ons, offs;
+  std::vector<std::pair<std::uint32_t, std::uint32_t> > tempos;  // (tick, usec)
+  for (std::uint16_t t = 0; t < ntracks; ++t) {
+    if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'r' || r.u8() != 'k') {
+      return out;
+    }
+    const std::uint32_t track_len = r.u32be();
+    if (!r.ok()) return out;
+    const std::size_t track_end = r.pos() + track_len;
+    if (!parseSmfTrack(&r, track_end, &ons, &offs, &tempos)) return out;
+  }
+  if (ons.empty()) return out;
+
+  std::sort(tempos.begin(), tempos.end());
+  auto tempoAt = [&](std::uint32_t tick) -> std::uint32_t {
+    std::uint32_t tempo = 1000000;  // Our files' fixed tempo.
+    for (const auto& te : tempos) {
+      if (te.first <= tick) {
+        tempo = te.second;
+      } else {
+        break;
+      }
+    }
+    return tempo;
+  };
+  auto tickToFrame = [&](std::uint32_t tick) -> std::uint32_t {
+    // frames = ticks * (usec/quarter) * 60fps / (1e6 * ticks/quarter).
+    const double frames = static_cast<double>(tick) *
+                          static_cast<double>(tempoAt(tick)) * 60.0 /
+                          (1000000.0 * static_cast<double>(division));
+    return static_cast<std::uint32_t>(frames + 0.5);
+  };
+
+  // Match offs to ons in tick order: index offs per (channel, key).
+  std::map<std::uint32_t, std::vector<std::size_t> > off_index;
+  for (std::size_t i = 0; i < offs.size(); ++i) {
+    const std::uint32_t k =
+        (static_cast<std::uint32_t>(offs[i].channel) << 8) |
+        static_cast<std::uint32_t>(offs[i].key);
+    off_index[k].push_back(i);
+  }
+  std::map<std::uint32_t, std::size_t> off_cursor;
+  std::vector<char> off_used(offs.size(), 0);
+
+  std::uint32_t max_tick = 0;
+  for (const auto& o : ons) max_tick = std::max(max_tick, o.tick);
+  for (const auto& o : offs) max_tick = std::max(max_tick, o.tick);
+
+  for (const auto& on : ons) {
+    const std::uint32_t k = (static_cast<std::uint32_t>(on.channel) << 8) |
+                            static_cast<std::uint32_t>(on.key);
+    std::uint32_t off_tick = max_tick;  // Dangling note-on: close at end.
+    auto it = off_index.find(k);
+    if (it != off_index.end()) {
+      std::size_t& cur = off_cursor[k];
+      while (cur < it->second.size() &&
+             (off_used[it->second[cur]] != 0 ||
+              offs[it->second[cur]].tick < on.tick)) {
+        ++cur;
+      }
+      if (cur < it->second.size()) {
+        off_tick = offs[it->second[cur]].tick;
+        off_used[it->second[cur]] = 1;
+        ++cur;
+      }
+    }
+    const std::uint32_t frame = tickToFrame(on.tick);
+    const std::uint32_t off_frame = tickToFrame(off_tick);
+    SimNoteEvent ev_on;
+    ev_on.frame = frame;
+    ev_on.channel = static_cast<std::uint8_t>(on.channel);
+    ev_on.note = static_cast<std::uint8_t>(on.key);
+    int vel = on.vel < 1 ? 1 : (on.vel > 127 ? 127 : on.vel);
+    ev_on.velocity = static_cast<std::uint8_t>(vel);
+    const std::uint32_t dur =
+        off_frame > frame ? off_frame - frame : 0;
+    ev_on.duration_frames =
+        static_cast<std::uint16_t>(dur > 0xFFFF ? 0xFFFF : dur);
+    ev_on.is_note_on = true;
+    out.push_back(ev_on);
+    SimNoteEvent ev_off;
+    ev_off.frame = off_frame;
+    ev_off.channel = ev_on.channel;
+    ev_off.note = ev_on.note;
+    ev_off.velocity = 0;
+    ev_off.duration_frames = 0;
+    ev_off.is_note_on = false;
+    out.push_back(ev_off);
+  }
+  std::stable_sort(out.begin(), out.end(),
+                   [](const SimNoteEvent& a, const SimNoteEvent& b) {
+                     return a.frame < b.frame;
+                   });
+  return out;
+}
+
+std::string EnhancementManager::midiPathFor(
+    const std::string& song, const std::string& target) const {
+  if (repo_root_.empty()) return "";
+  return (fs::path(repo_root_) / "dos_port" / "assets" / "midi" / target /
+          (song + ".mid"))
+      .string();
+}
+
+std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
+    const std::string& song, const std::string& target) const {
+  const std::string path = midiPathFor(song, target);
+  if (path.empty()) return {};
+  return loadMidiFile(path);
+}
+
+}  // namespace audio_dbg

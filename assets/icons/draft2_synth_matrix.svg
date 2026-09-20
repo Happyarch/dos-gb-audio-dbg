@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="dgad synth matrix icon">
+  <defs>
+    <linearGradient id="d2bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2A3040"/>
+      <stop offset="0.4" stop-color="#151923"/>
+      <stop offset="1" stop-color="#07080C"/>
+    </linearGradient>
+    <linearGradient id="d2metal" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E8ECF2"/>
+      <stop offset="0.45" stop-color="#9AA2B2"/>
+      <stop offset="0.55" stop-color="#6E7688"/>
+      <stop offset="1" stop-color="#3A3F4C"/>
+    </linearGradient>
+    <linearGradient id="d2lcd" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFC25E"/>
+      <stop offset="0.5" stop-color="#F59A1F"/>
+      <stop offset="1" stop-color="#B25A06"/>
+    </linearGradient>
+    <linearGradient id="d2badge" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F7DC9A"/>
+      <stop offset="0.5" stop-color="#C79A3B"/>
+      <stop offset="1" stop-color="#7A5414"/>
+    </linearGradient>
+    <linearGradient id="d2panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#232936"/>
+      <stop offset="1" stop-color="#11141C"/>
+    </linearGradient>
+    <radialGradient id="d2ledA" cx="0.35" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#FFF3C4"/><stop offset="0.4" stop-color="#FFB62E"/><stop offset="1" stop-color="#7A3D00"/>
+    </radialGradient>
+    <radialGradient id="d2ledG" cx="0.35" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#D6FFD6"/><stop offset="0.4" stop-color="#2EFF7A"/><stop offset="1" stop-color="#0A5A26"/>
+    </radialGradient>
+    <radialGradient id="d2ledR" cx="0.35" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#FFD2D2"/><stop offset="0.4" stop-color="#FF4444"/><stop offset="1" stop-color="#6E0A0A"/>
+    </radialGradient>
+    <radialGradient id="d2ledOff" cx="0.35" cy="0.3" r="0.9">
+      <stop offset="0" stop-color="#4A4E58"/><stop offset="1" stop-color="#15161B"/>
+    </radialGradient>
+    <filter id="d2glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="2.4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="d2shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="2.5" flood-color="#000" flood-opacity="0.6"/>
+    </filter>
+    <pattern id="d2dots" width="5" height="5" patternUnits="userSpaceOnUse">
+      <circle cx="2.5" cy="2.5" r="0.9" fill="#000000" opacity="0.35"/>
+    </pattern>
+    <pattern id="d2scan" width="4" height="3" patternUnits="userSpaceOnUse">
+      <rect width="4" height="1" y="2" fill="#000" opacity="0.22"/>
+    </pattern>
+  </defs>
+
+  <!-- app frame -->
+  <rect x="2" y="2" width="252" height="252" rx="54" fill="#000000"/>
+  <rect x="6" y="6" width="244" height="244" rx="50" fill="url(#d2bg)"/>
+  <rect x="6" y="6" width="244" height="244" rx="50" fill="none" stroke="#3A4358" stroke-width="1.5" opacity="0.8"/>
+  <!-- edge light -->
+  <line x1="30" y1="12" x2="120" y2="12" stroke="#33E8FF" stroke-width="2" opacity="0.7" stroke-linecap="round"/>
+  <line x1="136" y1="244" x2="226" y2="244" stroke="#FF3FA4" stroke-width="2" opacity="0.6" stroke-linecap="round"/>
+
+  <!-- sound-card bracket -->
+  <g filter="url(#d2shadow)">
+    <rect x="18" y="20" width="220" height="26" rx="6" fill="url(#d2metal)"/>
+    <rect x="18" y="20" width="220" height="26" rx="6" fill="none" stroke="#14161B" stroke-width="1.5"/>
+    <circle cx="32" cy="33" r="5" fill="#22252C"/><circle cx="32" cy="33" r="2" fill="#0B0C0E"/>
+    <circle cx="224" cy="33" r="5" fill="#22252C"/><circle cx="224" cy="33" r="2" fill="#0B0C0E"/>
+    <g fill="#2C313C">
+      <rect x="52" y="28" width="4" height="10" rx="2"/><rect x="60" y="28" width="4" height="10" rx="2"/>
+      <rect x="68" y="28" width="4" height="10" rx="2"/><rect x="192" y="28" width="4" height="10" rx="2"/>
+      <rect x="200" y="28" width="4" height="10" rx="2"/>
+    </g>
+    <text x="128" y="37" text-anchor="middle" font-family="monospace, sans-serif" font-size="9" font-weight="bold" letter-spacing="2" fill="#2A2E38">DGAD SOUND BRACKET</text>
+  </g>
+
+  <!-- MT-32 LCD banner -->
+  <g filter="url(#d2shadow)">
+    <rect x="24" y="54" width="208" height="66" rx="10" fill="#0C0D10"/>
+    <rect x="24" y="54" width="208" height="66" rx="10" fill="none" stroke="#3A3F4C" stroke-width="1.5"/>
+    <rect x="32" y="62" width="192" height="50" rx="5" fill="url(#d2lcd)"/>
+    <rect x="32" y="62" width="192" height="50" rx="5" fill="url(#d2dots)"/>
+    <rect x="32" y="62" width="192" height="50" rx="5" fill="url(#d2scan)"/>
+    <rect x="32" y="62" width="192" height="18" rx="5" fill="#FFFFFF" opacity="0.18"/>
+    <text x="128" y="82" text-anchor="middle" font-family="monospace, sans-serif" font-size="13" font-weight="bold" letter-spacing="1.5" fill="#2A1500">DGAD MT-32 STUDIO</text>
+    <text x="128" y="101" text-anchor="middle" font-family="monospace, sans-serif" font-size="10.5" letter-spacing="1" fill="#3A1E00">P01 STRINGS L12 CH10 ♪</text>
+  </g>
+
+  <!-- partial-state LED grid -->
+  <text x="32" y="135" font-family="monospace, sans-serif" font-size="8" letter-spacing="2" fill="#8A93A8">PARTIAL STATE</text>
+  <text x="196" y="135" font-family="monospace, sans-serif" font-size="8" letter-spacing="1" fill="#5A6274">OPL3 FM</text>
+  <g filter="url(#d2glow)">
+    <!-- row 1 amber -->
+    <circle cx="40" cy="146" r="6" fill="url(#d2ledA)"/><circle cx="64" cy="146" r="6" fill="url(#d2ledA)"/>
+    <circle cx="88" cy="146" r="6" fill="url(#d2ledOff)"/><circle cx="112" cy="146" r="6" fill="url(#d2ledA)"/>
+    <circle cx="136" cy="146" r="6" fill="url(#d2ledA)"/><circle cx="160" cy="146" r="6" fill="url(#d2ledOff)"/>
+    <circle cx="184" cy="146" r="6" fill="url(#d2ledA)"/><circle cx="208" cy="146" r="6" fill="url(#d2ledA)"/>
+    <!-- row 2 green/red -->
+    <circle cx="40" cy="162" r="6" fill="url(#d2ledG)"/><circle cx="64" cy="162" r="6" fill="url(#d2ledG)"/>
+    <circle cx="88" cy="162" r="6" fill="url(#d2ledR)"/><circle cx="112" cy="162" r="6" fill="url(#d2ledG)"/>
+    <circle cx="136" cy="162" r="6" fill="url(#d2ledG)"/><circle cx="160" cy="162" r="6" fill="url(#d2ledG)"/>
+    <circle cx="184" cy="162" r="6" fill="url(#d2ledR)"/><circle cx="208" cy="162" r="6" fill="url(#d2ledG)"/>
+  </g>
+  <g font-family="monospace, sans-serif" font-size="6.5" fill="#6E7688" text-anchor="middle">
+    <text x="40" y="175">1</text><text x="64" y="175">2</text><text x="88" y="175">3</text><text x="112" y="175">4</text>
+    <text x="136" y="175">5</text><text x="160" y="175">6</text><text x="184" y="175">7</text><text x="208" y="175">8</text>
+  </g>
+
+  <!-- MIDI / wave panel -->
+  <g filter="url(#d2shadow)">
+    <rect x="24" y="180" width="208" height="38" rx="7" fill="url(#d2panel)" stroke="#343B4E" stroke-width="1"/>
+    <g>
+      <rect x="32" y="188" width="34" height="7" rx="2" fill="#33E8FF" opacity="0.9"/>
+      <rect x="70" y="188" width="22" height="7" rx="2" fill="#FF3FA4" opacity="0.9"/>
+      <rect x="96" y="188" width="44" height="7" rx="2" fill="#3DFF7A" opacity="0.85"/>
+      <rect x="144" y="188" width="18" height="7" rx="2" fill="#FFB62E" opacity="0.9"/>
+      <rect x="166" y="188" width="30" height="7" rx="2" fill="#33E8FF" opacity="0.7"/>
+      <rect x="32" y="199" width="20" height="7" rx="2" fill="#FF3FA4" opacity="0.7"/>
+      <rect x="56" y="199" width="48" height="7" rx="2" fill="#33E8FF" opacity="0.9"/>
+      <rect x="108" y="199" width="26" height="7" rx="2" fill="#FFB62E" opacity="0.85"/>
+      <rect x="138" y="199" width="58" height="7" rx="2" fill="#3DFF7A" opacity="0.7"/>
+    </g>
+    <path d="M32,214 C60,206 80,220 108,212 S160,204 188,212 S214,216 224,210"
+          fill="none" stroke="#33E8FF" stroke-width="1.8" filter="url(#d2glow)" opacity="0.95"/>
+  </g>
+
+  <!-- hardware badge -->
+  <g filter="url(#d2shadow)">
+    <rect x="40" y="224" width="176" height="20" rx="10" fill="url(#d2badge)" stroke="#4A3208" stroke-width="1"/>
+    <text x="128" y="238" text-anchor="middle" font-family="monospace, sans-serif" font-size="9.5" font-weight="bold" letter-spacing="1.5" fill="#2A1C05">DGAD • OPL3 | MT-32 | GM</text>
+  </g>
+  <!-- knobs -->
+  <g>
+    <circle cx="28" cy="232" r="7" fill="#22252C" stroke="#4A5162" stroke-width="1.5"/>
+    <line x1="28" y1="232" x2="28" y2="227" stroke="#33E8FF" stroke-width="2" stroke-linecap="round"/>
+    <circle cx="228" cy="232" r="7" fill="#22252C" stroke="#4A5162" stroke-width="1.5"/>
+    <line x1="228" y1="232" x2="232" y2="235" stroke="#FFB62E" stroke-width="2" stroke-linecap="round"/>
+  </g>
+</svg>

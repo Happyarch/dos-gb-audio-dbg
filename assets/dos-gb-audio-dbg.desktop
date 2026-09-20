@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DOS GB Audio Debugger
+GenericName=Game Boy & DOS Audio Workbench
+Comment=Real-time audio debugger and player for GB to DOS porting projects
+Exec=dgad %F
+Icon=dos-gb-audio-dbg
+Terminal=false
+Categories=AudioVideo;Audio;Development;Debugger;
+Keywords=GameBoy;DOS;OPL3;MT-32;Sound;Midi;
+StartupNotify=true
