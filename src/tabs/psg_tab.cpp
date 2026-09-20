@@ -68,8 +68,12 @@ void PsgTab::drawChannelStrips(const DeviceSnapshot& s) {
   // Channel cards: type name + frequency/volume, dormant fast escape.
   for (std::size_t i = 0; i < s.channels.size(); ++i) {
     const int ch = static_cast<int>(i);
+    // Scope the row's widgets so the constant muteLabel ("M"/"M*") does not
+    // collide across rows (and against sibling rows elsewhere in the panel).
+    ImGui::PushID(ch);
     if (s.channels[i].dormant) {
       ImGui::TextDisabled("CH%d dormant", ch);
+      ImGui::PopID();
       continue;
     }
     const char* type = "—";
@@ -84,6 +88,7 @@ void PsgTab::drawChannelStrips(const DeviceSnapshot& s) {
     ImGui::Text("CH%d %s %.1f Hz vol=%d", ch, type, freq, vol);
     ImGui::SameLine();
     if (ImGui::SmallButton(muteLabel(s.channels[i].muted))) onMuteClick(ch);
+    ImGui::PopID();
   }
 }
 

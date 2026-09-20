@@ -65,8 +65,12 @@ void FmTab::drawChannelStrips(const DeviceSnapshot& s) {
   // Voice grid: one cell per voice, dormant cells take the fast escape.
   for (std::size_t i = 0; i < s.channels.size(); ++i) {
     const int v = static_cast<int>(i);
+    // Scope the row's widgets so the constant muteLabel ("M"/"M*") does not
+    // collide across rows (and against sibling rows elsewhere in the panel).
+    ImGui::PushID(v);
     if (s.channels[i].dormant) {
       ImGui::TextDisabled("V%02d dormant", v);
+      ImGui::PopID();
       continue;
     }
     const VoiceView vv = voiceView(v);
@@ -74,6 +78,7 @@ void FmTab::drawChannelStrips(const DeviceSnapshot& s) {
                 vv.keyed_on ? "KEY" : "off", vv.env_vol);
     ImGui::SameLine();
     if (ImGui::SmallButton(muteLabel(s.channels[i].muted))) onMuteClick(v);
+    ImGui::PopID();
   }
 }
 
