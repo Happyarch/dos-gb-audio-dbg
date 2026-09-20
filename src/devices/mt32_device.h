@@ -16,9 +16,14 @@
 //     the rhythm assignment (measured via probe), so the device does not
 //     second-guess the ROM. Channels 10-15 (0-based) stay unmapped:
 //     the MT-32 has only 9 parts.
-//   - native engine telemetry, zero heuristics: activePartialCount() counts
-//     non-INACTIVE slots from Synth::getPartialStates(), partActive() wraps
-//     Synth::getPartStates(), lcdText() wraps Synth::getDisplayState().
+//   - native engine telemetry, zero heuristics: partActive() wraps
+//     Synth::getPartStates() (MUNT's documented LCD-activity metric: a part
+//     is active while it holds an active non-releasing partial) and is the
+//     single source of truth for "active" -- the UI part LEDs and the
+//     partial-readout both use it, so a release tail cannot light one while
+//     the other is dark. activePartialCount() counts the same non-releasing
+//     notion (ATTACK/SUSTAIN slots from Synth::getPartialStates());
+//     lcdText() wraps Synth::getDisplayState().
 //     In mock mode the same queries are derived from the note matrix and a
 //     20-char LCD buffer (Roland display SysEx updates it, like hardware).
 //   - 16 MIDI channels track in the base; MT-32 parts 1-8 listen on
@@ -90,6 +95,10 @@ class Mt32Device : public MidiDevice {
   void reset() override;
   void render(float* buf, std::size_t frames) override;
   void renderPerChannel(float** bufs, std::size_t frames) override;
+  // Fills each part-mapped channel's ChannelState from the engine's own voice
+  // queries (partActive()/getPlayingNotes()) and marks it `library_voices`, so
+  // the tracker reads MUNT's view instead of our stale register mirror.
+  DeviceSnapshot snapshot() const override;
   void setMute(int ch, bool muted) override;
   void setSolo(int ch, bool soloed) override;
 
@@ -112,8 +121,9 @@ class Mt32Device : public MidiDevice {
   static const char* mt32TimbreName(int program);
 
   // --- Native engine telemetry (no heuristics) ---
-  // Real synth: non-INACTIVE partial slots from getPartialStates().
-  // Mock: sounding notes capped at kPartialSlots.
+  // Real synth: non-releasing (ATTACK/SUSTAIN) partial slots from
+  // getPartialStates() -- the per-partial counterpart of getPartStates()'s
+  // LCD-activity predicate. Mock: sounding notes capped at kPartialSlots.
   int activePartialCount() const;
   // 0=INACTIVE 1=ATTACK 2=SUSTAIN 3=RELEASE, -1 when slot out of range.
   int partialState(int slot) const;
@@ -121,6 +131,14 @@ class Mt32Device : public MidiDevice {
   // note on the mapped channel (part p <-> channel p+1, rhythm <-> ch 9).
   bool partActive(int part) const;
   std::string lcdText() const;
+
+  // Coherent per-UI-frame telemetry. Call ONCE at the start of a tab's draw
+  // pass: it takes telemetry_mutex_ a single time and latches the snapshot,
+  // so drawChannelStrips() + drawDetail() read one engine instant instead of
+  // a different snapshot per accessor. Before the first call the accessors
+  // fall back to one locked read each, which keeps non-UI callers and unit
+  // tests working.
+  void beginUiFrame() const;
 
   // --- Part / voice queries (MUNT-QT parity) ---
   // Both read the telemetry shadow snapshot produced by the render thread,
@@ -178,6 +196,12 @@ class Mt32Device : public MidiDevice {
     std::array<char, kLcdChars + 1> lcd{};
   };
 
+  // Coherent snapshot for the current UI frame, or nullptr when no frame is
+  // open (the caller then takes telemetry_mutex_ for a one-shot read).
+  const Telemetry* uiTelemetry() const {
+    return ui_frame_open_ ? &ui_telemetry_ : nullptr;
+  }
+
   std::uint32_t sample_rate_;
   bool inited_ = false;
   bool mock_ = true;
@@ -196,6 +220,11 @@ class Mt32Device : public MidiDevice {
   // Guards telemetry_ between the render thread and the UI thread.
   mutable std::mutex telemetry_mutex_;
   Telemetry telemetry_;
+  // UI-frame coherence cache (UI thread only). ui_frame_open_ latches on the
+  // first beginUiFrame(); the accessors then read ui_telemetry_ lock-free, so
+  // one draw pass sees one engine instant.
+  mutable bool ui_frame_open_ = false;
+  mutable Telemetry ui_telemetry_;
 };
 
 }  // namespace audio_dbg

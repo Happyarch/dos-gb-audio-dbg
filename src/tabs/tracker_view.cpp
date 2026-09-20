@@ -74,7 +74,13 @@ TrackerCell TrackerView::cellForChannel(const SimState& sim,
   int chip_note = -1;
   if (ch >= 0 && static_cast<std::size_t>(ch) < snap.channels.size()) {
     const ChannelState& s = snap.channels[static_cast<std::size_t>(ch)];
-    if (!s.dormant && s.active && s.last_note >= 0) chip_note = s.last_note;
+    if (s.library_voices) {
+      // Engine-reported voice state (MT-32 getPartStates()/getPlayingNotes()).
+      // Never the register-level mirror, which survives reset().
+      chip_note = s.sounding_note;
+    } else if (!s.dormant && s.active && s.last_note >= 0) {
+      chip_note = s.last_note;
+    }
   }
   c.sim_note = sim_note;
   c.chip_note = chip_note;
@@ -125,7 +131,12 @@ std::vector<TrackerCell> TrackerView::compareEvents(
     int chip_note = -1;
     if (ch >= 0 && static_cast<std::size_t>(ch) < snap.channels.size()) {
       const ChannelState& s = snap.channels[static_cast<std::size_t>(ch)];
-      if (!s.dormant && s.active && s.last_note >= 0) chip_note = s.last_note;
+      if (s.library_voices) {
+        // Engine-reported voice state, same rule as cellForChannel().
+        chip_note = s.sounding_note;
+      } else if (!s.dormant && s.active && s.last_note >= 0) {
+        chip_note = s.last_note;
+      }
     }
     c.chip_note = chip_note;
     c.divergent = isDivergent(sounding, chip_note);

@@ -123,6 +123,11 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
     ImGui::TextDisabled("No MT-32 device attached.");
     return;
   }
+  // One coherent telemetry snapshot for this drawChannelStrips()+drawDetail()
+  // pass: every accessor below (partActive/patchName/partialState/lcdText)
+  // reads this latch instead of taking its own telemetry_mutex_ read, so the
+  // strip LEDs and the detail readout cannot straddle two engine instants.
+  mt32_->beginUiFrame();
   // MUNT-QT parity: 9 rows (Parts 1-8 + Rhythm). Channel 0 is part-less
   // on factory hardware and gets no strip. Dormant parts take the fast
   // escape (label only, no bar work).
@@ -135,7 +140,8 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
       ImGui::PopID();
       continue;
     }
-    // Activity LED: green when the part is active, dim otherwise.
+    // Activity LED: green when the part is active, dim otherwise. Sourced
+    // from MUNT's getPartStates() (partActive), the LCD-activity metric.
     if (ps.active) {
       ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.2f, 1.0f), "[o]");
     } else {
@@ -150,32 +156,43 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
     if (ImGui::SmallButton("[M]")) onMuteClick(ps.channel);
     if (muted) ImGui::PopStyleColor();
     ImGui::SameLine();
-    const int prog = mt32_->program(ps.channel);
     // Shadow-snapshot read (never the live synth): safe on the UI thread.
     const std::string cur_patch = mt32_->patchName(part);
-    // Timbre selector combo (128 factory timbres).
-    char combo_id[32];
-    std::snprintf(combo_id, sizeof(combo_id), "##mt32prog%d", part);
-    ImGui::SetNextItemWidth(140.0f);
-    if (ImGui::BeginCombo(combo_id, cur_patch.c_str())) {
-      for (int p = 0; p < 128; ++p) {
-        const bool selected = (p == prog);
-        if (ImGui::Selectable(programName(p), selected)) {
-          mt32_->dispatchProgramChange(ps.channel, p);
+    if (part < 8) {
+      // Melodic part: 128-timbre selector combo. `program()` is only
+      // meaningful for melodic parts (parts 1-8).
+      const int prog = mt32_->program(ps.channel);
+      char combo_id[32];
+      std::snprintf(combo_id, sizeof(combo_id), "##mt32prog%d", part);
+      ImGui::SetNextItemWidth(140.0f);
+      if (ImGui::BeginCombo(combo_id, cur_patch.c_str())) {
+        for (int p = 0; p < 128; ++p) {
+          const bool selected = (p == prog);
+          if (ImGui::Selectable(programName(p), selected)) {
+            mt32_->dispatchProgramChange(ps.channel, p);
+          }
+          if (selected) ImGui::SetItemDefaultFocus();
         }
-        if (selected) ImGui::SetItemDefaultFocus();
+        ImGui::EndCombo();
       }
-      ImGui::EndCombo();
+      ImGui::SameLine();
+      // Musical keyboard pitch scale bar showing active sounding notes
+      // (MUNT-QT parity). Melodic-position based: not for the rhythm part.
+      ImDrawList* dl = ImGui::GetWindowDrawList();
+      const ImVec2 origin = ImGui::GetCursorScreenPos();
+      constexpr float kBarW = 240.0f;
+      constexpr float kBarH = 16.0f;
+      drawPartPitchScale(dl, origin, ImVec2(kBarW, kBarH), part);
+      ImGui::Dummy(ImVec2(kBarW, kBarH));
+      ImGui::SameLine();
+    } else {
+      // Part 8 is the fixed rhythm channel: a non-interactive label, no
+      // dropdown and no arrow, mirroring MUNT-QT's PatchNameButton. MUNT owns
+      // the rhythm structure (getPatchName(8) / getPartStates() bit 8); we
+      // keep no melodic program for it.
+      ImGui::TextUnformatted(cur_patch.c_str());
+      ImGui::SameLine();
     }
-    ImGui::SameLine();
-    // Musical keyboard pitch scale bar showing active sounding notes (MUNT-QT parity).
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    constexpr float kBarW = 240.0f;
-    constexpr float kBarH = 16.0f;
-    drawPartPitchScale(dl, origin, ImVec2(kBarW, kBarH), part);
-    ImGui::Dummy(ImVec2(kBarW, kBarH));
-    ImGui::SameLine();
     // Peak level meter.
     ImGui::ProgressBar(ps.peak, ImVec2(70.0f, 0.0f));
     ImGui::PopID();
@@ -254,7 +271,11 @@ void Mt32Tab::drawDetail(const DeviceSnapshot& s) {
   ImGui::EndChild();
   ImGui::PopStyleColor(2);
 
-  // 32-slot partial-state 4x8 LED matrix + numeric readout.
+  // 32-slot partial-state 4x8 LED matrix + numeric readout. The readout
+  // counts non-releasing partials, the same "active" predicate behind MUNT's
+  // getPartStates() (the LCD-activity metric the part LEDs use), so a RELEASE
+  // tail cannot show as a sounding voice next to an unlit part. The matrix
+  // itself remains an envelope-phase view (RELEASE renders amber, uncounted).
   const int active = activePartialCount();
   ImGui::Text("Partials: %d / %d", active, kPartialSlots);
   for (int row = 0; row < 4; ++row) {

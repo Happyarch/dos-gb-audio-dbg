@@ -298,9 +298,20 @@ void Mt32Device::programChange(int ch, int program) {
 
 void Mt32Device::dispatchProgramChange(int ch, int program) {
   if (!chInRange(ch)) return;
-  setProgram(ch, program);
+  int prog = program;
+  if (prog < 0) prog = 0;
+  if (prog > 127) prog = 127;
+  if (ch == kRhythmChannel) {
+    // Channel 9 is the fixed rhythm part: MUNT's RhythmPart::setProgram() is
+    // a no-op and the part has no melodic program, so do not maintain a
+    // melodic programs_[9] shadow. The rhythm row reads MUNT's patch name /
+    // getPartStates() bit 8 instead. The channel still wakes so its strip
+    // becomes visible, and the program change is still forwarded (harmless).
+    wakeChannel(ch);
+  } else {
+    setProgram(ch, prog);
+  }
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) return;
-  const int prog = MidiDevice::program(ch);
   const std::uint32_t msg =
       (0xC0u | static_cast<std::uint32_t>(ch & 0x0F)) |
       (static_cast<std::uint32_t>(prog) << 8);
@@ -370,6 +381,7 @@ int Mt32Device::activePartialCount() const {
     }
     return count > kPartialSlots ? kPartialSlots : count;
   }
+  if (const Telemetry* t = uiTelemetry()) return t->partial_count;
   std::lock_guard<std::mutex> lock(telemetry_mutex_);
   return telemetry_.partial_count;
 }
@@ -381,6 +393,9 @@ int Mt32Device::partialState(int slot) const {
                ? static_cast<int>(MT32Emu::PartialState_SUSTAIN)
                : static_cast<int>(MT32Emu::PartialState_INACTIVE);
   }
+  if (const Telemetry* t = uiTelemetry()) {
+    return t->partial_state[static_cast<std::size_t>(slot)];
+  }
   std::lock_guard<std::mutex> lock(telemetry_mutex_);
   return telemetry_.partial_state[static_cast<std::size_t>(slot)];
 }
@@ -391,6 +406,9 @@ bool Mt32Device::partActive(int part) const {
     const int ch = (part == 8) ? kRhythmChannel : part + 1;
     return !isDormant(ch) && activeNoteCount(ch) > 0;
   }
+  if (const Telemetry* t = uiTelemetry()) {
+    return t->part_active[static_cast<std::size_t>(part)] != 0;
+  }
   std::lock_guard<std::mutex> lock(telemetry_mutex_);
   return telemetry_.part_active[static_cast<std::size_t>(part)] != 0;
 }
@@ -399,8 +417,17 @@ std::string Mt32Device::lcdText() const {
   if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) {
     return std::string(lcd_.data(), kLcdChars);
   }
+  if (const Telemetry* t = uiTelemetry()) return std::string(t->lcd.data());
   std::lock_guard<std::mutex> lock(telemetry_mutex_);
   return std::string(telemetry_.lcd.data());
+}
+
+void Mt32Device::beginUiFrame() const {
+  // One lock for the whole UI draw pass; the accessors then read the cache.
+  if (!inited_ || mock_ || synth_ == nullptr || !synth_open_) return;
+  std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  ui_telemetry_ = telemetry_;
+  ui_frame_open_ = true;
 }
 
 void Mt32Device::renderMockMono(float* out, std::size_t frames,
@@ -458,9 +485,18 @@ void Mt32Device::updateTelemetry() {
   const MT32Emu::Bit32u partials = synth_->getPartialCount();
   std::vector<MT32Emu::PartialState> states(partials > 0 ? partials : 1u);
   synth_->getPartialStates(states.data());
+  // "Active" is MUNT's documented LCD-activity predicate, shared with the part
+  // LEDs: a partial counts only while it is non-releasing (ATTACK/SUSTAIN),
+  // exactly the per-partial basis of Synth::getPartStates(). Counting RELEASE
+  // here lit the readout while every part LED was dark (release tail, or a
+  // Note-Off mute). The 32-slot grid still renders RELEASE as a phase colour
+  // -- that is a phase view, not a sounding voice.
   int count = 0;
   for (MT32Emu::Bit32u i = 0; i < partials; ++i) {
-    if (states[i] != MT32Emu::PartialState_INACTIVE) ++count;
+    if (states[i] == MT32Emu::PartialState_ATTACK ||
+        states[i] == MT32Emu::PartialState_SUSTAIN) {
+      ++count;
+    }
     if (i < static_cast<MT32Emu::Bit32u>(kPartialSlots)) {
       t.partial_state[i] = static_cast<int>(states[i]);
     }
@@ -533,9 +569,12 @@ std::string Mt32Device::patchName(int part) const {
   if (part == 8) return "Rhythm Channel";
   if (part >= 0 && part < kParts && synth_ != nullptr && synth_open_ &&
       !mock_) {
+    const std::size_t p = static_cast<std::size_t>(part);
+    if (const Telemetry* t = uiTelemetry()) {
+      return std::string(t->patch_name[p].data());
+    }
     std::lock_guard<std::mutex> lock(telemetry_mutex_);
-    return std::string(telemetry_.patch_name[static_cast<std::size_t>(part)]
-                           .data());
+    return std::string(telemetry_.patch_name[p].data());
   }
   const int ch = (part == 8) ? kRhythmChannel : part + 1;
   return mt32TimbreName(program(ch));
@@ -544,15 +583,19 @@ std::string Mt32Device::patchName(int part) const {
 int Mt32Device::getPlayingNotes(int part, std::uint8_t* keys,
                                 std::uint8_t* velocities) const {
   if (part < 0 || part >= kParts) return 0;
-  if (synth_ != nullptr && synth_open_ && !mock_) {
-    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+  const auto copyFrom = [&](const Telemetry& t) {
     const std::size_t p = static_cast<std::size_t>(part);
-    const int count = telemetry_.playing_count[p];
+    const int count = t.playing_count[p];
     for (int i = 0; i < count; ++i) {
-      if (keys != nullptr) keys[i] = telemetry_.playing_keys[p][i];
-      if (velocities != nullptr) velocities[i] = telemetry_.playing_vel[p][i];
+      if (keys != nullptr) keys[i] = t.playing_keys[p][i];
+      if (velocities != nullptr) velocities[i] = t.playing_vel[p][i];
     }
     return count;
+  };
+  if (synth_ != nullptr && synth_open_ && !mock_) {
+    if (const Telemetry* t = uiTelemetry()) return copyFrom(*t);
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    return copyFrom(telemetry_);
   }
   // Mock / fallback: read from MidiDevice note tracking.
   const int ch = (part == 8) ? kRhythmChannel : part + 1;
@@ -566,6 +609,44 @@ int Mt32Device::getPlayingNotes(int part, std::uint8_t* keys,
     }
   }
   return count;
+}
+
+DeviceSnapshot Mt32Device::snapshot() const {
+  DeviceSnapshot s = makeSnapshot();
+  // MT-32 channels are part-mapped (1-8 -> parts 1-8, 9 -> rhythm) or
+  // part-less (0, 10-15). Our own register mirror is not authoritative for
+  // any of them, so mark every channel engine-sourced: a reset() clears the
+  // synth but not the base note tracking, and the tracker must not show the
+  // stale mirror.
+  for (ChannelState& cs : s.channels) {
+    cs.library_voices = true;
+    cs.sounding_note = -1;
+  }
+  const auto setPart = [&s](int part, const std::uint8_t* keys, int count) {
+    const int ch = (part == kParts - 1) ? kRhythmChannel : part + 1;
+    if (ch < 0 || static_cast<std::size_t>(ch) >= s.channels.size()) return;
+    ChannelState& cs = s.channels[static_cast<std::size_t>(ch)];
+    cs.library_voices = true;
+    // One tracker cell per channel: the first engine-reported note.
+    cs.sounding_note = (count > 0 && keys != nullptr) ? keys[0] : -1;
+  };
+  if (synth_ != nullptr && synth_open_ && !mock_) {
+    std::lock_guard<std::mutex> lock(telemetry_mutex_);
+    for (int part = 0; part < kParts; ++part) {
+      const std::size_t p = static_cast<std::size_t>(part);
+      setPart(part, telemetry_.playing_keys[p].data(),
+              telemetry_.playing_count[p]);
+    }
+    return s;
+  }
+  // Mock / fallback: getPlayingNotes() reads the base note matrix (no lock).
+  for (int part = 0; part < kParts; ++part) {
+    std::uint8_t keys[32] = {0};
+    std::uint8_t vels[32] = {0};
+    const int count = getPlayingNotes(part, keys, vels);
+    setPart(part, keys, count);
+  }
+  return s;
 }
 
 void Mt32Device::renderPerChannel(float** bufs, std::size_t frames) {

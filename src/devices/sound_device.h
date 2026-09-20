@@ -49,6 +49,15 @@ struct ChannelState {
   bool active = false;   // Currently sounding (note/key on).
   float peak = 0.0f;     // Last observed linear peak, for strip meters.
   int last_note = -1;    // Last MIDI note number, -1 = none.
+  // Authoritative engine voice state. A backend whose library exposes voice
+  // queries (MT-32: Synth::getPartStates()/getPlayingNotes()) sets
+  // `library_voices` true and fills `sounding_note` in snapshot(); consumers
+  // that need the engine's own view (the tracker's chip column) then ignore
+  // the register-level `active`/`last_note` mirror above, which is our
+  // parallel bookkeeping and goes stale across reset(). Register-only
+  // backends leave `library_voices` false and keep the old path.
+  bool library_voices = false;
+  int sounding_note = -1;  // Engine-reported sounding note, -1 = none.
 };
 
 // Point-in-time copy handed to the UI thread. Produced by snapshot().
