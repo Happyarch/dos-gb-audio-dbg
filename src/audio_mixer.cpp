@@ -30,9 +30,9 @@ bool AudioMixer::init(int output_rate, int buffer_frames, bool disabled) {
                         ? static_cast<std::size_t>(buffer_frames_)
                         : kScratchFrames;
   mono_scratch_.assign(scratch_frames_, 0.0f);
-  dev_scratch_.assign(scratch_frames_ + scratch_frames_ / 8 +
-                          kResamplerPrime + 8,
-                      0.0f);
+  // Device-native input scratch: one mixer block, plus slack so an oversized
+  // caller block clamps instead of overflowing. SDL keeps the leftover.
+  dev_scratch_.assign(scratch_frames_ + 8, 0.0f);
   if (disabled) {
     open_ = true;
     return true;
@@ -125,36 +125,45 @@ void AudioMixer::resampleInto(SoundDevice* dev, std::size_t frames,
                               float* mono) {
   ResampleState* rs = resampler_.load();
   if (dev == nullptr || rs == nullptr || rs->stream == nullptr) {
-    std::memset(mono, 0, frames * sizeof(float));
+    if (dev != nullptr) {
+      // No stream (rates equal or SDL refused one): render 1:1 so the device
+      // -- and therefore the AudioClockShim -- is still pulled every block.
+      dev->render(mono, frames);
+    } else {
+      std::memset(mono, 0, frames * sizeof(float));
+    }
     return;
   }
-  // Exact fractional input accounting: feeding ceil() every block would grow
-  // the stream's backlog (latency creep), so carry the fraction and feed the
-  // exact average. The one-time priming offset covers the filter's initial
-  // history without shifting the long-run rate.
-  rs->frac += static_cast<double>(frames) * static_cast<double>(rs->in_rate);
-  std::size_t dev_frames =
-      static_cast<std::size_t>(rs->frac / static_cast<double>(rs->out_rate));
-  rs->frac -=
-      static_cast<double>(dev_frames) * static_cast<double>(rs->out_rate);
-  if (!rs->primed) {
-    dev_frames += kResamplerPrime;
-    rs->primed = true;
-  }
+  // Let SDL own the ratio entirely: render one output block of device-native
+  // input, Put all of it, then Get what SDL has ready. There is no rate math,
+  // no fractional carry and no priming feed here -- SDL_AudioStream keeps
+  // whatever it has not emitted yet as its own bounded backlog, so the
+  // long-run ratio is exactly in_rate:out_rate with no drift and no latency
+  // creep. `frames` is used as both the input block and the output cap; SDL's
+  // ratio means the two differ by the conversion factor, and the backlog
+  // absorbs the difference.
+  std::size_t dev_frames = frames;
   if (dev_frames > dev_scratch_.size()) dev_frames = dev_scratch_.size();
   if (dev_frames == 0) dev_frames = 1;
 
   // Pull the device at its native rate: this is the AudioClockShim's
   // sample-accounting boundary, so it must run every block.
   dev->render(dev_scratch_.data(), dev_frames);
-  SDL_AudioStreamPut(rs->stream, dev_scratch_.data(),
-                     static_cast<int>(dev_frames * sizeof(float)));
+  const int put_bytes = static_cast<int>(dev_frames * sizeof(float));
+  if (SDL_AudioStreamPut(rs->stream, dev_scratch_.data(), put_bytes) != 0) {
+    std::memset(mono, 0, frames * sizeof(float));
+    return;
+  }
   const int want_bytes = static_cast<int>(frames * sizeof(float));
   const int got_bytes = SDL_AudioStreamGet(rs->stream, mono, want_bytes);
   const std::size_t got =
       got_bytes > 0
           ? std::min(static_cast<std::size_t>(got_bytes) / sizeof(float), frames)
           : 0;
+  // SDL emits at its own ratio, so a single block usually yields close to
+  // `frames` but not exactly; pad the difference with silence. The un-emitted
+  // samples stay in the stream and surface on the next Get. This is SDL's
+  // conversion lateness, not a hand-rolled feed.
   if (got < frames) {
     std::memset(mono + got, 0, (frames - got) * sizeof(float));
   }
@@ -198,24 +207,25 @@ void AudioMixer::resampleLinear(const float* in, std::size_t in_frames,
 
 void AudioMixer::pushMasterRing(const float* mono, std::size_t frames) {
   if (mono == nullptr || frames == 0) return;
-  std::lock_guard<std::mutex> lock(ring_mutex_);
+  // Lock-free SPSC: the audio callback is the sole producer (see
+  // WaveformRing in devices/sound_device.h). No mutex on the realtime path.
   master_ring_.push(mono, frames);
 }
 
 std::size_t AudioMixer::copyMasterWaveform(float* dst,
                                            std::size_t n) const {
   if (dst == nullptr || n == 0) return 0;
-  std::lock_guard<std::mutex> lock(ring_mutex_);
+  // Lock-free SPSC: the UI thread is the sole consumer.
   return master_ring_.copyRecent(dst, n);
 }
 
 std::size_t AudioMixer::masterWaveSize() const {
-  std::lock_guard<std::mutex> lock(ring_mutex_);
   return master_ring_.size();
 }
 
 void AudioMixer::clearMasterWaveform() {
-  std::lock_guard<std::mutex> lock(ring_mutex_);
+  // Reader-side reset: safe because the UI thread owns the consume side and
+  // the producer only ever advances its own write counter monotonically.
   master_ring_.clear();
 }
 

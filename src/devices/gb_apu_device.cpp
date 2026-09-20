@@ -88,6 +88,11 @@ bool GbApuDevice::init() {
     if (master_ == nullptr) return false;
   }
   if (master_->set_sample_rate(sample_rate_) != 0) return false;
+  // Realtime render scratch, sized once on the UI thread: no allocation is
+  // allowed inside render()/drainApu(). Guarded by `inited_`; resize() on
+  // this path never touches a running callback.
+  tmp_scratch_.assign(kScratchFrames, 0.0f);
+  discard_scratch_.assign(kScratchFrames, 0.0f);
   regs_.fill(0);
   shadow_init_.fill(false);
   for (int i = 0; i < kChannels; ++i) {
@@ -545,20 +550,39 @@ std::uint8_t GbApuDevice::power() const {
   return regs_[0xFF26 - 0xFF10];
 }
 
+void GbApuDevice::refreshAudibleCache() const {
+  const int n = channelCount();
+  bool any = false;
+  for (int i = 0; i < kChannels; ++i) {
+    if (i >= n) {
+      gate_muted_[static_cast<std::size_t>(i)] = true;
+      gate_soloed_[static_cast<std::size_t>(i)] = false;
+      continue;
+    }
+    const ChannelState& st = channel(static_cast<int>(i));
+    gate_muted_[static_cast<std::size_t>(i)] = st.muted;
+    gate_soloed_[static_cast<std::size_t>(i)] = st.soloed;
+    if (st.soloed) any = true;
+  }
+  // Non-atomic publication: the audio thread consumes a write that is at
+  // worst one snapshot stale (the previous UI snapshot), and an int/bool
+  // write followed by the UI loop's own read-back is torn-read safe on x86.
+  any_solo_ = any;
+}
+
 bool GbApuDevice::channelAudible(int ch) const {
   if (ch < 0 || ch >= channelCount()) return false;
-  DeviceSnapshot s = makeSnapshot();
-  const ChannelState& st = s.channels[static_cast<std::size_t>(ch)];
-  if (st.muted) return false;
-  bool any_solo = false;
-  for (const ChannelState& c : s.channels) {
-    if (c.soloed) {
-      any_solo = true;
-      break;
-    }
-  }
-  if (any_solo && !st.soloed) return false;
+  if (gate_muted_[static_cast<std::size_t>(ch)]) return false;
+  if (any_solo_ && !gate_soloed_[static_cast<std::size_t>(ch)]) return false;
   return true;
+}
+
+bool GbApuDevice::hasMutedChannel() const {
+  const int n = channelCount();
+  for (int i = 0; i < kChannels && i < n; ++i) {
+    if (gate_muted_[static_cast<std::size_t>(i)]) return true;
+  }
+  return false;
 }
 
 std::size_t GbApuDevice::drainApu(GbVoiceApu* apu, float* out,
@@ -601,16 +625,10 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
     std::memset(buf, 0, frames * sizeof(float));
     return;
   }
-  bool any_gate = false;
-  {
-    DeviceSnapshot s = makeSnapshot();
-    for (const ChannelState& c : s.channels) {
-      if (c.muted || c.soloed) {
-        any_gate = true;
-        break;
-      }
-    }
-  }
+  // Snapshot-free realtime path: the mix scratch + drain sink are members
+  // sized at init(), and the mute/solo decision reads the lock-free gate
+  // cache (refreshAudibleCache(), UI thread) rather than re-snapshotting.
+  const bool any_gate = any_solo_ || hasMutedChannel();
   if (!any_gate) {
     const std::size_t got = drainApu(master_, buf, frames);
     if (got < frames) {
@@ -622,26 +640,33 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
     // take the fast escape.
     for (int c = 0; c < kChannels; ++c) {
       if (isDormant(c) || !shadow_init_[static_cast<std::size_t>(c)]) continue;
-      float tap[64];
+      float* tap = discard_scratch_.data();
       std::size_t rem = frames;
       while (rem > 0) {
-        std::size_t step = std::min(rem, std::size_t(64));
+        const std::size_t step =
+            std::min(rem, discard_scratch_.size());
         const std::size_t got = drainApu(shadows_[c], tap, step);
+        if (got == 0) break;  // Defensive: never spin on a dry APU.
         pushWaveform(c, tap, got);
-        rem -= step;
+        rem -= got;  // drainApu returns the frames actually produced.
       }
     }
   } else {
     std::memset(buf, 0, frames * sizeof(float));
-    std::vector<float> tmp(frames);
+    float* tmp = tmp_scratch_.data();
+    // The scratch is sized for the mixer's block; clamp rather than write
+    // past it. The unrendered tail stays zero (already memset above).
+    const std::size_t rem = std::min(frames, tmp_scratch_.size());
     for (int c = 0; c < kChannels; ++c) {
       if (isDormant(c)) continue;  // Fast escape.
       if (!channelAudible(c)) continue;
       if (!shadow_init_[static_cast<std::size_t>(c)]) continue;
-      const std::size_t got = drainApu(shadows_[c], tmp.data(), frames);
+      const std::size_t got = drainApu(shadows_[c], tmp, rem);
       for (std::size_t i = 0; i < got; ++i) buf[i] += tmp[i];
-      pushWaveform(c, tmp.data(), got);  // Audio-thread scope tap.
+      pushWaveform(c, tmp, got);  // Audio-thread scope tap.
     }
+    // Any frames past the scratch window stay silent; the clamp above is the
+    // only place `frames` can exceed tmp_scratch_ (the mixer never does).
     for (std::size_t i = 0; i < frames; ++i) {
       if (buf[i] > 1.0f)
         buf[i] = 1.0f;
@@ -649,12 +674,13 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
         buf[i] = -1.0f;
     }
     // Keep the master clocked so a later unmuted render stays continuous.
-    float discard[64];
-    std::size_t rem = frames;
-    while (rem > 0) {
-      std::size_t step = std::min(rem, std::size_t(64));
-      drainApu(master_, discard, step);
-      rem -= step;
+    std::size_t mrem = frames;
+    while (mrem > 0) {
+      const std::size_t step = std::min(mrem, discard_scratch_.size());
+      const std::size_t got =
+          drainApu(master_, discard_scratch_.data(), step);
+      if (got == 0) break;  // Defensive: never spin on a dry APU.
+      mrem -= got;
     }
   }
   float peak = 0.0f;
@@ -663,6 +689,21 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
     if (a > peak) peak = a;
   }
   noteMasterPeak(peak);
+}
+
+void GbApuDevice::setMute(int ch, bool muted) {
+  PsgDevice::setMute(ch, muted);
+  refreshAudibleCache();
+}
+
+void GbApuDevice::setSolo(int ch, bool soloed) {
+  PsgDevice::setSolo(ch, soloed);
+  refreshAudibleCache();
+}
+
+DeviceSnapshot GbApuDevice::snapshot() const {
+  refreshAudibleCache();
+  return makeSnapshot();
 }
 
 void GbApuDevice::renderPerChannel(float** bufs, std::size_t frames) {
@@ -684,13 +725,16 @@ void GbApuDevice::renderPerChannel(float** bufs, std::size_t frames) {
     }
     if (!channelAudible(c)) {
       std::memset(out, 0, frames * sizeof(float));
-      // Still step the shadow so unmuting resumes in sync.
+      // Still step the shadow so unmuting resumes in sync. renderPerChannel
+      // runs on the stems/UI thread, NOT the audio callback, so it keeps its
+      // own stack sink rather than sharing the callback's member scratch.
       float discard[64];
       std::size_t rem = frames;
       while (rem > 0) {
-        std::size_t step = std::min(rem, std::size_t(64));
-        drainApu(shadows_[c], discard, step);
-        rem -= step;
+        const std::size_t step = std::min(rem, std::size_t(64));
+        const std::size_t got = drainApu(shadows_[c], discard, step);
+        if (got == 0) break;  // Defensive: never spin on a dry APU.
+        rem -= got;
       }
       continue;
     }

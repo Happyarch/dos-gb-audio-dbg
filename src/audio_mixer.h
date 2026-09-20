@@ -18,8 +18,9 @@
 // (L == R) after applying master gain/mute.
 //
 // Scope + record feeds: every rendered block pushes post-gain mono into
-// `master_ring_` (mutex-guarded `WaveformRing` for the oscilloscope) and, when
-// a `Recorder` is attached and recording, forwards the block to it.
+// `master_ring_` (a lock-free SPSC `WaveformRing` for the oscilloscope -- the
+// audio callback produces, the UI consumes) and, when a `Recorder` is
+// attached and recording, forwards the block to it.
 //
 // Device/channel mute/solo live on the `SoundDevice` (pre-synth filter for
 // MIDI, voice matrix for FM/PSG). The mixer stages only the pointer swap
@@ -35,7 +36,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <vector>
 
 #include <SDL.h>
@@ -123,18 +123,17 @@ class AudioMixer {
   void clearMasterWaveform();
 
  private:
-  // One resampler configuration: a band-limited SDL_AudioStream plus the
-  // fractional input-sample carry that keeps its backlog (and therefore its
-  // latency) constant. Published atomically by setDevice() and consumed
-  // lock-free by renderBlock(). A state is never mutated or freed by
-  // setDevice() once published -- the callback that already loaded it stays
-  // valid; retired states are freed in shutdown().
+  // One resampler configuration: a band-limited SDL_AudioStream configured
+  // for one in_rate -> out_rate pair. Published atomically by setDevice() and
+  // consumed lock-free by renderBlock(). SDL owns the ratio: the callback
+  // Puts a block's worth of native-rate input and Gets what is available, so
+  // no fractional carry or priming state lives here. A state is never mutated
+  // or freed by setDevice() once published -- the callback that already
+  // loaded it stays valid; retired states are freed in shutdown().
   struct ResampleState {
     SDL_AudioStream* stream = nullptr;  // null => passthrough (rates equal)
     int in_rate = 0;
     int out_rate = 0;
-    double frac = 0.0;    // fractional input-sample carry (< out_rate)
-    bool primed = false;  // resampler filter-history priming applied once
   };
 
   static void SDLCALL sdlCallback(void* userdata, Uint8* stream, int len);
@@ -156,7 +155,8 @@ class AudioMixer {
   int output_rate_ = kDefaultOutputRate;
   int buffer_frames_ = kDefaultBufferFrames;
 
-  mutable std::mutex ring_mutex_;
+  // Lock-free SPSC scope ring: the audio callback produces, the UI consumes
+  // (see WaveformRing in devices/sound_device.h). No mutex.
   WaveformRing master_ring_{65536};
 
   // Resampler states (see ResampleState). resampler_ is the live one;
@@ -172,8 +172,6 @@ class AudioMixer {
   // Floor for the realtime scratch (frames); a larger request is clamped and
   // the tail zero-filled rather than allocating on the audio thread.
   static constexpr std::size_t kScratchFrames = 8192;
-  // Extra input frames fed once to prime the SDL resampler's filter history.
-  static constexpr std::size_t kResamplerPrime = 32;
 };
 
 }  // namespace audio_dbg

@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "devices/psg_device.h"
 
@@ -88,6 +89,14 @@ class GbApuDevice : public PsgDevice {
   void handleCommand(std::uint8_t opcode, const std::uint8_t* payload,
                      std::size_t len) override;
 
+  // --- Mute/solo/snapshot: keep the lock-free gate cache current ---
+  // Every UI read (snapshot) and every gate mutation (setMute/setSolo)
+  // refreshes `gate_muted_`/`gate_soloed_`/`any_solo_`, so the audio thread
+  // never has to snapshot the ChannelState vector.
+  void setMute(int ch, bool muted) override;
+  void setSolo(int ch, bool soloed) override;
+  DeviceSnapshot snapshot() const override;
+
   long sampleRate() const { return sample_rate_; }
   bool isShadowInitialized(int ch) const;
 
@@ -113,7 +122,18 @@ class GbApuDevice : public PsgDevice {
   static double pulseFreqHz(int freq_val);
   static double waveFreqHz(int freq_val);
   static double noiseFreqHz(std::uint8_t nr43);
+  // Per-channel mute/solo gate. Reads the cached per-channel gate flags
+  // (`gate_muted_` / `gate_soloed_`, refreshed by snapshot()/setMute()/
+  // setSolo()) instead of building a DeviceSnapshot -- the old
+  // makeSnapshot() call heap-copied every channel name once per channel per
+  // audio callback.
   bool channelAudible(int ch) const;
+  // True when any live channel has its mute toggle set (fast gate-cache read).
+  bool hasMutedChannel() const;
+  // Rebuilds the lock-free per-channel gate cache + `any_solo_` from the live
+  // ChannelState. UI thread (snapshot()/setMute()/setSolo()); the audio
+  // callback only reads. No re-snapshot from the render path.
+  void refreshAudibleCache() const;
   // Drains one APU frame into mono floats; returns frames written.
   std::size_t drainApu(GbVoiceApu* apu, float* out, std::size_t max_frames);
 
@@ -124,6 +144,23 @@ class GbApuDevice : public PsgDevice {
   GbVoiceApu* master_ = nullptr;
   GbVoiceApu* shadows_[kChannels] = {nullptr, nullptr, nullptr, nullptr};
   std::array<bool, kChannels> shadow_init_{};
+
+  // Realtime render scratch, preallocated at init() so the audio callback
+  // never allocates: `tmp_scratch_` is the muted/soloed mix staging buffer
+  // (render()) and `discard_scratch_` the drain-only sink used to keep
+  // gates/audible-but-replacing shadows clocked.
+  std::vector<float> tmp_scratch_;
+  std::vector<float> discard_scratch_;
+
+  // Lock-free per-channel gate cache (see channelAudible/refreshAudibleCache).
+  // `mutable` so the const UI-thread snapshot() can refresh it.
+  mutable std::array<bool, kChannels> gate_muted_{};
+  mutable std::array<bool, kChannels> gate_soloed_{};
+  mutable bool any_solo_ = false;
+
+  // Realtime scratch floor (frames): the SDL callback block (512) and the
+  // headless per-frame render both fit well under this.
+  static constexpr std::size_t kScratchFrames = 8192;
 };
 
 }  // namespace audio_dbg
