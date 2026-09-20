@@ -70,11 +70,13 @@ std::size_t frameSampleCount(std::uint32_t rate, std::uint32_t frame);
 // Exact total mono samples for `frames` frames at `rate`.
 std::uint64_t totalSamplesFor(std::uint32_t rate, std::uint32_t frames);
 
-// Single-event dispatch for replay: opcode 0x90 (note-on, payload
-// ch/note/vel) and 0x80 (note-off, payload ch/note) reach MidiDevice via
-// noteOn()/noteOff() and any other backend via handleCommand() — the same
-// mapping SessionEngine::tick() applies. All other opcodes forward to
-// handleCommand() verbatim.
+// Single-event dispatch for replay. For MidiDevice the decoded opcodes map
+// to the concrete MIDI API the way SessionEngine::tick() applies them:
+// 0x90 (note-on, payload ch/note/vel) -> noteOn(), 0x80 (note-off, payload
+// ch/note) -> noteOff(), 0xC0 (program change, payload ch/program) ->
+// programChange() and 0xB0 (control change, payload ch/controller/value) ->
+// sendControlChange(). Every other backend, plus any opcode a MidiDevice
+// does not decode, forwards to handleCommand() verbatim.
 void dispatchReplayEvent(SoundDevice* dev, std::uint8_t opcode,
                          const std::uint8_t* payload, std::size_t len);
 

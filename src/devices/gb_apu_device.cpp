@@ -617,16 +617,17 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
       std::memset(buf + got, 0, (frames - got) * sizeof(float));
     }
     // Keep shadows clocked when they are awake so a later stem render does
-    // not observe a stale frame. Dormant shadows take the fast escape.
+    // not observe a stale frame, and tap their output into the scope ring
+    // (audio thread; the UI only reads it via copyWaveform). Dormant shadows
+    // take the fast escape.
     for (int c = 0; c < kChannels; ++c) {
       if (isDormant(c) || !shadow_init_[static_cast<std::size_t>(c)]) continue;
-      // Drain-and-discard keeps the shadow's Blip_Buffer from growing
-      // without bound between master-only renders.
-      float discard[64];
+      float tap[64];
       std::size_t rem = frames;
       while (rem > 0) {
         std::size_t step = std::min(rem, std::size_t(64));
-        drainApu(shadows_[c], discard, step);
+        const std::size_t got = drainApu(shadows_[c], tap, step);
+        pushWaveform(c, tap, got);
         rem -= step;
       }
     }
@@ -639,6 +640,7 @@ void GbApuDevice::render(float* buf, std::size_t frames) {
       if (!shadow_init_[static_cast<std::size_t>(c)]) continue;
       const std::size_t got = drainApu(shadows_[c], tmp.data(), frames);
       for (std::size_t i = 0; i < got; ++i) buf[i] += tmp[i];
+      pushWaveform(c, tmp.data(), got);  // Audio-thread scope tap.
     }
     for (std::size_t i = 0; i < frames; ++i) {
       if (buf[i] > 1.0f)
@@ -696,7 +698,9 @@ void GbApuDevice::renderPerChannel(float** bufs, std::size_t frames) {
     if (got < frames) {
       std::memset(out + got, 0, (frames - got) * sizeof(float));
     }
-    pushWaveform(c, out, frames);
+    // No scope push here: renderPerChannel runs on the stems/record thread.
+    // Scopes are fed exclusively by render() on the audio thread (W6), which
+    // keeps the SoundDevice ring single-producer/lock-free.
   }
 }
 

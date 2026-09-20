@@ -14,14 +14,23 @@
 // 1-cycle fast escape. Dormant channels therefore cost nothing on
 // high-channel devices (18-voice OPL3, 16-channel GM).
 //
+// Oscilloscope feed (W6): the per-channel scope rings are lock-free SPSC.
+// The AUDIO thread is the sole producer: each backend's render() (the path
+// AudioMixer::renderBlock drives) taps its isolated per-voice/per-channel
+// buffers into the ring via pushWaveform(). The UI thread only ever reads
+// them, through copyWaveform() — it never calls the synth or advances
+// emulation to fill a scope.
+//
 // See docs/current_plan_debug_frontend.md §2.1 / §2.5.
 
 #ifndef PKMN_AUDIO_DBG_DEVICES_SOUND_DEVICE_H_
 #define PKMN_AUDIO_DBG_DEVICES_SOUND_DEVICE_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace audio_dbg {
@@ -71,45 +80,80 @@ struct SimState {
 // Fixed-capacity float ring buffer feeding per-channel oscilloscopes.
 // Oldest samples are overwritten once full; copyRecent() returns the
 // newest `n` samples in chronological order.
+//
+// Lock-free SPSC: exactly one thread pushes (the audio thread, inside
+// SoundDevice::render()), exactly one thread copies (the UI thread, inside
+// a tab's draw). The producer publishes a monotonically increasing write
+// counter with a release store; the consumer takes a single acquire
+// snapshot and derives the readable window from it, so there is no torn
+// index pair to reconcile. AudioMixer's master ring keeps its own mutex
+// around this class and is unaffected.
+//
+// Non-copyable, movable (a moved-from ring is empty-equivalent) so it can
+// live in std::vector.
 class WaveformRing {
  public:
   explicit WaveformRing(std::size_t capacity = 4096) : buf_(capacity, 0.0f) {}
 
+  WaveformRing(const WaveformRing&) = delete;
+  WaveformRing& operator=(const WaveformRing&) = delete;
+  WaveformRing(WaveformRing&& other) noexcept
+      : buf_(std::move(other.buf_)),
+        written_(other.written_.load(std::memory_order_relaxed)) {}
+  WaveformRing& operator=(WaveformRing&& other) noexcept {
+    if (this != &other) {
+      buf_ = std::move(other.buf_);
+      written_.store(other.written_.load(std::memory_order_relaxed),
+                     std::memory_order_relaxed);
+    }
+    return *this;
+  }
+
+  // Producer side (single writer). Appends `n` samples; oldest overwritten.
   void push(const float* samples, std::size_t n) {
     if (buf_.empty() || samples == nullptr || n == 0) return;
     const std::size_t cap = buf_.size();
+    // The producer owns `written_`; a relaxed read of its own last value is
+    // sufficient. Publish only once, after every slot is written.
+    std::size_t w = written_.load(std::memory_order_relaxed);
     for (std::size_t i = 0; i < n; ++i) {
-      buf_[head_] = samples[i];
-      head_ = (head_ + 1) % cap;
-      if (count_ < cap) ++count_;
+      buf_[w % cap] = samples[i];
+      ++w;
     }
+    written_.store(w, std::memory_order_release);
   }
 
-  // Copies up to `n` newest samples (oldest-first) into `dst`.
-  // Returns the number of samples actually written.
+  // Consumer side (single reader). Copies up to `n` newest samples
+  // (oldest-first) into `dst`. Returns the number actually written.
   std::size_t copyRecent(float* dst, std::size_t n) const {
-    if (dst == nullptr || n == 0 || count_ == 0) return 0;
-    std::size_t want = n < count_ ? n : count_;
+    if (dst == nullptr || n == 0 || buf_.empty()) return 0;
+    const std::size_t w = written_.load(std::memory_order_acquire);
+    if (w == 0) return 0;
     const std::size_t cap = buf_.size();
-    const std::size_t start = (head_ + cap - want) % cap;
+    const std::size_t avail = w < cap ? w : cap;
+    const std::size_t want = n < avail ? n : avail;
+    std::size_t start = (w - want) % cap;
     for (std::size_t i = 0; i < want; ++i) {
-      dst[i] = buf_[(start + i) % cap];
+      dst[i] = buf_[start];
+      start = (start + 1) % cap;
     }
     return want;
   }
 
-  void clear() {
-    head_ = 0;
-    count_ = 0;
-  }
+  // Reader-side reset (e.g. a tab clearing its view). Not safe to call
+  // concurrently with the producer publishing a block.
+  void clear() { written_.store(0, std::memory_order_release); }
 
-  std::size_t size() const { return count_; }
+  std::size_t size() const {
+    const std::size_t w = written_.load(std::memory_order_acquire);
+    const std::size_t cap = buf_.size();
+    return w < cap ? w : cap;
+  }
   std::size_t capacity() const { return buf_.size(); }
 
  private:
   std::vector<float> buf_;
-  std::size_t head_ = 0;   // Next write position.
-  std::size_t count_ = 0;  // Valid samples (<= capacity).
+  std::atomic<std::size_t> written_{0};  // Total samples ever pushed.
 };
 
 // Universal synthesizer backend interface.
@@ -185,10 +229,19 @@ class SoundDevice {
   float masterPeak() const { return master_peak_; }
 
   // --- Oscilloscope ring buffers (concrete) ---
+  // pushWaveform() is the AUDIO-thread producer side, called from each
+  // backend's render(); copyWaveform() is the UI-thread reader side, called
+  // from a tab's draw. Both are lock-free SPSC (see WaveformRing).
   // Dormant channels take the fast escape: nothing is stored.
   void pushWaveform(int ch, const float* samples, std::size_t n) {
     if (isDormant(ch) || samples == nullptr || n == 0) return;
     rings_[static_cast<std::size_t>(ch)].push(samples, n);
+  }
+
+  // UI-thread read: up to `n` newest samples for `ch`, oldest-first.
+  std::size_t copyWaveform(int ch, float* dst, std::size_t n) const {
+    if (ch < 0 || static_cast<std::size_t>(ch) >= rings_.size()) return 0;
+    return rings_[static_cast<std::size_t>(ch)].copyRecent(dst, n);
   }
 
   std::size_t waveSize(int ch) const {

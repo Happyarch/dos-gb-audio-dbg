@@ -205,9 +205,11 @@ void GbApuTab::drawDetail(const DeviceSnapshot& s) {
                   noiseWidthName(c.noise_seven_bit), p.lfsr_width,
                   c.noise_shift, c.noise_divisor, c.frequency, c.volume);
     }
-    // Per-channel oscilloscope with zero-crossing stabilization.
+    // Per-channel oscilloscope: read the audio-thread scope ring owned by
+    // the device (filled in GbApuDevice::render()). The UI never renders a
+    // scope itself. Stabilized on the first positive zero crossing.
     float buf[256];
-    const std::size_t got = copyWaveform(ch, buf, 256);
+    const std::size_t got = gb_->copyWaveform(ch, buf, 256);
     if (got >= 2) {
       const std::size_t start = findZeroCrossing(buf, got);
       const float* base = buf + (start < got ? start : 0);

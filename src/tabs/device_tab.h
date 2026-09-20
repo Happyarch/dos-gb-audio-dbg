@@ -9,6 +9,14 @@
 // `if (s.channels[i].dormant) continue;` so unused channels cost no UI
 // work. pushWaveformData() applies the same escape before buffering.
 //
+// Scope feed (W6): the LIVE oscilloscope samples are captured on the AUDIO
+// thread inside each backend's SoundDevice::render() and stored in the
+// device-owned SPSC ring; a concrete tab's draw reads them with
+// `<device>->copyWaveform(ch, dst, n)`. The `wave_rings_` storage below
+// backs the retained `pushWaveformData()` probe API (tab-local, unit
+// tests); production draw code must NOT read it — the UI thread never
+// renders a scope or advances emulation to fill one.
+//
 // See docs/current_plan_debug_frontend.md §2.1 / §2.5.
 
 #ifndef PKMN_AUDIO_DBG_TABS_DEVICE_TAB_H_
@@ -39,6 +47,9 @@ class DeviceTab {
   virtual void drawDetail(const DeviceSnapshot& s) = 0;
   virtual void drawTracker(const DeviceSnapshot& s, const SimState* sim) = 0;
   virtual void onMuteClick(int ch) = 0;
+  // Tab-local scope probe (dormant escape included). Retained for unit
+  // tests and out-of-band callers; the live draw path reads the device-owned
+  // ring via SoundDevice::copyWaveform() instead.
   virtual void pushWaveformData(int ch, const float* samples,
                                 std::size_t n) = 0;
 
@@ -90,10 +101,11 @@ class DeviceTab {
   }
 
  protected:
-  // UI-side scope storage for tabs that want it. pushWaveformData()
-  // overrides in concrete tabs call ensureWaveStorage() once (e.g. from
-  // drawChannelStrips when s.channels.size() is known) and then
-  // storeWaveform(). Both apply the §2.5 dormant escape via the caller.
+  // Tab-local scope storage backing the pushWaveformData() probe API only.
+  // Concrete overrides call ensureWaveStorage() once (when the channel count
+  // is known) and then storeWaveform(); both apply the §2.5 dormant escape
+  // via the caller. The live draw path uses SoundDevice::copyWaveform()
+  // (device-owned, audio-thread-fed) and does not touch these rings.
   void ensureWaveStorage(std::size_t channels, std::size_t capacity = 4096) {
     if (wave_rings_.size() != channels) {
       wave_rings_.clear();

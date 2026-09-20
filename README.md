@@ -40,7 +40,7 @@ touches only its device/tab subclass plus factory registration.
 | Tab      | Backend class  | Core linked                              | Native rate |
 |----------|----------------|------------------------------------------|-------------|
 | OPL3     | `Opl3Device`   | NukedOPL3 (`../dosbox-x/src/hardware/`)  | 49716 Hz    |
-| GB-APU   | `GbApuDevice`  | Gb_Snd_Emu (`../audio/.gb_snd_emu/`)     | 49716 Hz    |
+| GB-APU   | `GbApuDevice`  | Gb_Snd_Emu (`../audio/.gb_snd_emu/`)     | 48000 Hz    |
 | MT-32    | `Mt32Device`   | Munt `libmt32emu` (system, pkg-config)   | 32000 Hz    |
 | Gen. MIDI| `GmDevice`     | FluidSynth `libfluidsynth` (pkg-config)  | 44100 Hz    |
 

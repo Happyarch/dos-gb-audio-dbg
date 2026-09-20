@@ -127,9 +127,11 @@ void Opl3Tab::drawDetail(const DeviceSnapshot& s) {
     drawAlgorithm(ImGui::GetWindowDrawList(), origin, 64.0f, vs.connection,
                   vs.feedback);
     ImGui::Dummy(ImVec2(80.0f, 70.0f));
-    // Carrier oscilloscope: stabilized on the first positive zero crossing.
+    // Carrier oscilloscope: read the audio-thread scope ring owned by the
+    // device (filled in Opl3Device::render()). The UI never renders a scope
+    // itself. Stabilized on the first positive zero crossing.
     float buf[256];
-    const std::size_t got = copyWaveform(v, buf, 256);
+    const std::size_t got = opl3_->copyWaveform(v, buf, 256);
     if (got >= 2) {
       const std::size_t start = findZeroCrossing(buf, got);
       const float* base = buf + (start < got ? start : 0);

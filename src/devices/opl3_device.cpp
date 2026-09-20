@@ -560,20 +560,38 @@ void Opl3Device::render(float* buf, std::size_t frames) {
     // Gated path: sum audible shadow voices so muted/solo-excluded voices
     // contribute silence.
     std::memset(buf, 0, frames * sizeof(float));
+  }
+  // Scope tap (audio thread) + peak tracking for woken voices.
+  //
+  // One pass renders each awake voice's isolated shadow exactly once per
+  // block: the same chunk is (a) summed into `buf` in the gated mix path and
+  // (b) pushed into the SoundDevice SPSC scope ring. In the fast path the
+  // shadow is stepped for the scope only, so the main-chip mix in `buf` is
+  // untouched. The UI thread reads these samples via copyWaveform() and
+  // never renders a scope itself.
+  {
     constexpr std::size_t kChunk = 256;
     float tmp[kChunk];
     for (int v = 0; v < kVoices; ++v) {
       if (isVoiceDormant(v)) continue;  // Fast escape.
-      if (!channelAudible(v)) continue;
       if (!isShadowInitialized(v)) continue;
+      const bool mix_in = any_gate && channelAudible(v);
+      // Match the gated mix's renderPerChannel rule: a muted/solo-excluded
+      // voice is not stepped at all, so its shadow stays where it was.
+      if (any_gate && !mix_in) continue;
       std::size_t done = 0;
       while (done < frames) {
         const std::size_t want = std::min(kChunk, frames - done);
         renderMonoFromChip(&shadows_[static_cast<std::size_t>(v)], tmp, want);
-        for (std::size_t i = 0; i < want; ++i) buf[done + i] += tmp[i];
+        if (mix_in) {
+          for (std::size_t i = 0; i < want; ++i) buf[done + i] += tmp[i];
+        }
+        pushWaveform(v, tmp, want);
         done += want;
       }
     }
+  }
+  if (any_gate) {
     // Clamp the summed mix to [-1, 1].
     for (std::size_t i = 0; i < frames; ++i) {
       if (buf[i] > 1.0f)
@@ -582,7 +600,6 @@ void Opl3Device::render(float* buf, std::size_t frames) {
         buf[i] = -1.0f;
     }
   }
-  // Scope tap + peak tracking for woken voices.
   float peak = 0.0f;
   for (std::size_t i = 0; i < frames; ++i) {
     const float a = std::fabs(buf[i]);
@@ -613,7 +630,9 @@ void Opl3Device::renderPerChannel(float** bufs, std::size_t frames) {
       continue;
     }
     renderMonoFromChip(&shadows_[static_cast<std::size_t>(v)], out, frames);
-    pushWaveform(v, out, frames);
+    // No scope push here: renderPerChannel runs on the stems/record thread.
+    // Scopes are fed exclusively by render() on the audio thread (W6), which
+    // keeps the SoundDevice ring single-producer/lock-free.
   }
 }
 
