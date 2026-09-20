@@ -12,6 +12,12 @@
 
 #include <mt32emu/mt32emu.h>
 
+// The shared runtime Python bridge (sysex_bridge, header-inline) plus the
+// SysExMessages/SongTimbreSysex types. Included from the .cpp only: the
+// mechanics are header-inline, so device-only test binaries that do not
+// compile enhancement_manager.cpp still link.
+#include "enhancement_manager.h"
+
 namespace audio_dbg {
 
 namespace {
@@ -180,6 +186,11 @@ bool Mt32Device::init() {
     updateTelemetry();
   }
   inited_ = true;
+  // Upload the custom Timbre Memory bank once. Every per-track setup only
+  // rewrites Patch Memory pointers into these slots, so without this the
+  // slots hold factory occupants and a Program Change lands on the wrong
+  // voice. Real ROM only; the bridge is a no-op in mock mode.
+  if (!mock_) loadCustomTimbreBank();
   return true;
 }
 
@@ -358,6 +369,43 @@ void Mt32Device::parseDisplaySysEx(const std::uint8_t* data,
     lcd_[i] = (c >= 32 && c < 127) ? static_cast<char>(c) : ' ';
   }
   lcd_[kLcdChars] = '\0';
+}
+
+void Mt32Device::loadCustomTimbreBank() {
+  if (mock_ || !synth_open_) return;
+  const std::string repo_root = sysex_bridge::findRepoRoot();
+  if (repo_root.empty()) return;
+  std::vector<std::vector<std::uint8_t> > timbres;
+  SongTimbreSysex unused;
+  // The bridge imports the repository's own encoder (gen_mt32_patches); if
+  // python3/the script/the repo is unavailable this is a silent no-op, which
+  // is exactly the pre-existing factory-occupant behaviour.
+  if (!sysex_bridge::run(repo_root, "timbres", "", &timbres, &unused)) return;
+  sendSysExMessages(timbres);
+}
+
+void Mt32Device::sendSysExMessages(
+    const std::vector<std::vector<std::uint8_t> >& msgs) {
+  for (const std::vector<std::uint8_t>& msg : msgs) {
+    if (msg.empty()) continue;
+    dispatchSysEx(msg.data(), msg.size());
+  }
+}
+
+void Mt32Device::applySongTimbres(
+    const std::string& song,
+    const std::vector<std::vector<std::uint8_t> >& setup,
+    const std::vector<std::vector<std::uint8_t> >& cleanup) {
+  // Device-tab switch (same track): the previously armed timbres are already
+  // latched in Patch Memory -- re-sending would be redundant, and re-latching
+  // a Program Change is the caller's job (the event stream re-plays it).
+  if (!song.empty() && song == timbre_song_) return;
+  // Cleanup-then-setup, exactly like the DOS game's midi_seq_start: restore
+  // the previous track's Patch Memory before pointing at this track's.
+  sendSysExMessages(timbre_cleanup_);
+  sendSysExMessages(setup);
+  timbre_cleanup_ = cleanup;
+  timbre_song_ = song;
 }
 
 const char* Mt32Device::mt32TimbreName(int program) {

@@ -61,6 +61,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "devices/midi_device.h"
 
@@ -146,6 +147,23 @@ class Mt32Device : public MidiDevice {
   std::string patchName(int part) const;
   int getPlayingNotes(int part, std::uint8_t* keys, std::uint8_t* velocities) const;
 
+  // --- Custom-timbre SysEx (stateful across track loads) ---
+  // Sends each complete F0..F7 frame through the queued Sysex path (no-op in
+  // mock mode / before init). The frames come from the Python bridge in
+  // enhancement_manager.h (src/enhancement_sysex.py) -- no SysEx is encoded
+  // in C++.
+  void sendSysExMessages(const std::vector<std::vector<std::uint8_t> >& msgs);
+  // Per-track custom-timbre handover, matching the DOS game's
+  // midi_seq_start ordering: send the PREVIOUS track's cleanup (restoring the
+  // factory Patch Memory occupants), then this track's setup, and cache
+  // `cleanup` for the next handover. Custom timbres are stateful, so a track
+  // with no custom timbres still clears the previous track's rewrites via the
+  // empty-setup call. Re-applying the same `song` (device-tab switch, same
+  // track) is a no-op -- the timbres are already latched.
+  void applySongTimbres(const std::string& song,
+                        const std::vector<std::vector<std::uint8_t> >& setup,
+                        const std::vector<std::vector<std::uint8_t> >& cleanup);
+
   // --- Engine queue health (thread-safe) ---
   // Number of short/SysEx messages the MUNT event queue rejected (full).
   std::uint32_t droppedMessages() const { return dropped_msgs_.load(); }
@@ -182,6 +200,9 @@ class Mt32Device : public MidiDevice {
   void updateTelemetry();
   void parseDisplaySysEx(const std::uint8_t* data, std::size_t len);
   bool resolveRomPair();
+  // One-time Timbre Memory upload at init() via the Python bridge (real ROM
+  // only; a no-op in mock mode and when the repo/bridge is unavailable).
+  void loadCustomTimbreBank();
 
   static constexpr std::uint32_t kSysexQueueStorage = 4096;
 
@@ -213,6 +234,10 @@ class Mt32Device : public MidiDevice {
   const MT32Emu::ROMImage* ctrl_img_ = nullptr;
   const MT32Emu::ROMImage* pcm_img_ = nullptr;
   std::array<char, kLcdChars + 1> lcd_{};
+  // Custom-timbre handover state. Touched from the UI thread only
+  // (init/loadTrackBaseline); the synth sees the resulting queued SysEx.
+  std::string timbre_song_;
+  std::vector<std::vector<std::uint8_t> > timbre_cleanup_;
   // Mock voice phases, driven by the base note matrix.
   std::array<std::array<double, 128>, kChannels> phases_{};
   // Messages rejected by the full MUNT event queue (see droppedMessages()).

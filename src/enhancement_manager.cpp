@@ -22,28 +22,6 @@ namespace {
 
 namespace fs = std::filesystem;
 
-constexpr const char* kConstantsFile = "constants/music_constants.asm";
-
-// Same walk-up as SongCatalog: $PKMN_REPO_ROOT wins, else walk up to 12
-// levels looking for constants/music_constants.asm.
-std::string findRepoRoot() {
-  if (const char* env = std::getenv("PKMN_REPO_ROOT")) {
-    std::error_code ec;
-    if (fs::is_regular_file(fs::path(env) / kConstantsFile, ec)) return env;
-  }
-  std::error_code ec;
-  fs::path dir = fs::current_path(ec);
-  if (ec) return "";
-  for (int i = 0; i < 12; ++i) {
-    if (fs::is_regular_file(dir / kConstantsFile, ec)) {
-      return dir.string();
-    }
-    if (!dir.has_parent_path()) break;
-    dir = dir.parent_path();
-  }
-  return "";
-}
-
 std::string readWholeFile(const std::string& path, bool* ok) {
   std::ifstream in(path, std::ios::binary);
   if (!in.is_open()) {
@@ -54,21 +32,6 @@ std::string readWholeFile(const std::string& path, bool* ok) {
   ss << in.rdbuf();
   if (ok != nullptr) *ok = true;
   return ss.str();
-}
-
-// Single-quote a shell argument (repo paths contain spaces; embedded
-// single quotes use the close-quote / escaped-quote / reopen idiom).
-std::string shellQuote(const std::string& s) {
-  std::string out = "'";
-  for (char c : s) {
-    if (c == '\'') {
-      out += "'\\''";
-    } else {
-      out += c;
-    }
-  }
-  out += "'";
-  return out;
 }
 
 std::string sanitizeNote(const std::string& note) {
@@ -227,9 +190,11 @@ bool extractTempos(SmfReader* r, std::size_t track_end,
 }
 
 // Parses one track's events with per-track Note-Off to Note-On matching.
+// Embedded SysEx frames (status 0xF0/0xF7) are retained verbatim in
+// encounter order when `sysex_out` is non-null; otherwise they are skipped.
 template <typename F>
 bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
-                   std::vector<SimNoteEvent>* out) {
+                   std::vector<SimNoteEvent>* out, SysExMessages* sysex_out) {
   std::uint32_t tick = 0;
   std::uint8_t running = 0;
   std::vector<std::pair<std::uint32_t, int> > pending[16][128];
@@ -255,7 +220,18 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
     } else if (status == 0xF0 || status == 0xF7) {
       const std::uint32_t len = r->vlq();
       if (!r->ok()) return false;
-      r->skip(len);
+      if (sysex_out != nullptr) {
+        // Retain the frame payload; the caller decides what to do with it.
+        std::vector<std::uint8_t> frame;
+        frame.reserve(len);
+        for (std::uint32_t i = 0; i < len; ++i) {
+          frame.push_back(r->u8());
+          if (!r->ok()) return false;
+        }
+        if (!frame.empty()) sysex_out->push_back(std::move(frame));
+      } else {
+        r->skip(len);
+      }
       running = 0;
     } else {
       const std::uint8_t hi = status & 0xF0;
@@ -373,7 +349,7 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
 }  // namespace
 
 EnhancementManager::EnhancementManager()
-    : EnhancementManager(findRepoRoot()) {}
+    : EnhancementManager(sysex_bridge::findRepoRoot()) {}
 
 EnhancementManager::EnhancementManager(const std::string& repo_root)
     : repo_root_(repo_root) {
@@ -573,9 +549,11 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
              "src" / "enhancement_dump.py";
   }
   if (!fs::is_regular_file(bridge, ec)) return out;
-  const std::string cmd = "python3 " + shellQuote(bridge.string()) + " " +
-                          shellQuote(repo_root_) + " " + shellQuote(song) +
-                          " --target " + shellQuote(target) + " 2>/dev/null";
+  const std::string cmd =
+      "python3 " + sysex_bridge::shellQuote(bridge.string()) + " " +
+      sysex_bridge::shellQuote(repo_root_) + " " +
+      sysex_bridge::shellQuote(song) + " --target " +
+      sysex_bridge::shellQuote(target) + " 2>/dev/null";
   FILE* pipe = ::popen(cmd.c_str(), "r");
   if (pipe == nullptr) return out;
   bool saw_ok = false;
@@ -651,14 +629,19 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
 
 std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     const std::string& path) const {
-  std::vector<SimNoteEvent> out;
+  return parseMidiFile(path).notes;
+}
+
+MidiFileData EnhancementManager::parseMidiFile(
+    const std::string& path) const {
+  MidiFileData result;
   bool ok = false;
   const std::string bytes = readWholeFile(path, &ok);
-  if (!ok || bytes.size() < 14) return out;
+  if (!ok || bytes.size() < 14) return result;
   const auto* data = reinterpret_cast<const std::uint8_t*>(bytes.data());
   SmfReader r(data, bytes.size());
   if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'h' || r.u8() != 'd') {
-    return out;
+    return result;
   }
   const std::uint32_t header_len = r.u32be();
   const std::uint16_t format = r.u16be();
@@ -666,10 +649,10 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
   const std::uint16_t division = r.u16be();
   if (!r.ok() || (format != 0 && format != 1) || (division & 0x8000) != 0 ||
       division == 0) {
-    return out;  // SMPTE divisions carry no tempo map; unsupported.
+    return result;  // SMPTE divisions carry no tempo map; unsupported.
   }
   r.skip(header_len > 6 ? header_len - 6 : 0);
-  if (!r.ok()) return out;
+  if (!r.ok()) return result;
 
   struct TrackInfo {
     std::size_t start_pos = 0;
@@ -681,14 +664,14 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
 
   for (std::uint16_t t = 0; t < ntracks; ++t) {
     if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'r' || r.u8() != 'k') {
-      return out;
+      return result;
     }
     const std::uint32_t track_len = r.u32be();
-    if (!r.ok()) return out;
+    if (!r.ok()) return result;
     const std::size_t track_start = r.pos();
     const std::size_t track_end = track_start + track_len;
     track_infos.push_back({track_start, track_end});
-    if (!extractTempos(&r, track_end, &tempos)) return out;
+    if (!extractTempos(&r, track_end, &tempos)) return result;
     r.seek(track_end);
   }
 
@@ -712,14 +695,18 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     return static_cast<std::uint32_t>(frames + 0.5);
   };
 
-  // Pass 2: parse each track with per-track Note-Off to Note-On matching.
+  // Pass 2: parse each track with per-track Note-Off to Note-On matching,
+  // retaining embedded SysEx frames instead of skipping them.
   for (const auto& ti : track_infos) {
     r.seek(ti.start_pos);
-    if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &out)) return out;
+    if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &result.notes,
+                       &result.sysex)) {
+      return result;
+    }
   }
 
-  std::stable_sort(out.begin(), out.end(), eventLess);
-  return out;
+  std::stable_sort(result.notes.begin(), result.notes.end(), eventLess);
+  return result;
 }
 
 std::string EnhancementManager::midiPathFor(
@@ -735,6 +722,21 @@ std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
   const std::string path = midiPathFor(song, target);
   if (path.empty()) return {};
   return loadMidiFile(path);
+}
+
+SysExMessages EnhancementManager::loadTimbreBank() const {
+  SysExMessages timbres;
+  SongTimbreSysex unused;
+  sysex_bridge::run(repo_root_, "timbres", "", &timbres, &unused);
+  return timbres;
+}
+
+SongTimbreSysex EnhancementManager::loadSongTimbreSysex(
+    const std::string& song) const {
+  SongTimbreSysex out;
+  if (song.empty() || repo_root_.empty()) return out;
+  sysex_bridge::run(repo_root_, "song", song, nullptr, &out);
+  return out;
 }
 
 }  // namespace audio_dbg

@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <SDL.h>
@@ -120,15 +121,37 @@ audio_dbg::SimState buildSimState(const audio_dbg::SessionEngine& engine) {
 // Stops the engine, replaces the event stream, sizes total_frames past the
 // last event, arms the YAML watcher, and applies the compiled enhancement
 // layer when the python bridge resolves one.
+// Also performs the stateful MT-32 custom-timbre handover: previous track's
+// cleanup then new track's setup (enhancement_sysex.py), before any Program
+// Change is dispatched. `mt32` may be null (no synth handover).
 void loadTrackBaseline(audio_dbg::SessionEngine& engine,
                        audio_dbg::EnhancementManager& enh_mgr,
                        audio_dbg::SongCatalog& catalog, const char* constant,
-                       const char* target = "mt32") {
+                       const char* target = "mt32",
+                       audio_dbg::Mt32Device* mt32 = nullptr) {
   const audio_dbg::SongInfo* info = catalog.findTrack(constant);
   if (info == nullptr) return;
-  std::vector<audio_dbg::SimNoteEvent> base =
-      enh_mgr.loadSongBaseline(info->header_label, target);
+  // Custom timbres are stateful across track loads: send the PREVIOUS track's
+  // factory-restore cleanup then THIS track's setup, both produced by the
+  // Python bridge (enhancement_sysex.py -> midi_to_stream.build_song_sysex).
+  // Runs before the baseline check so a no-custom-timbre track still clears
+  // the previous track's Patch Memory rewrites. This happens before the
+  // Program Change stream plays -- MUNT latches Patch Memory at PC time.
+  if (mt32 != nullptr) {
+    audio_dbg::SongTimbreSysex sx =
+        enh_mgr.loadSongTimbreSysex(info->header_label);
+    mt32->applySongTimbres(info->header_label, sx.setup, sx.cleanup);
+  }
+  audio_dbg::MidiFileData midi =
+      enh_mgr.parseMidiFile(enh_mgr.midiPathFor(info->header_label, target));
+  std::vector<audio_dbg::SimNoteEvent> base = std::move(midi.notes);
   if (base.empty()) return;
+  // Embedded SysEx retained by the SMF parser reaches the synth too, before
+  // setEvents()/syncDeviceState() replays the frame-0 Program Changes that
+  // latch Patch Memory.
+  if (mt32 != nullptr && !midi.sysex.empty()) {
+    mt32->sendSysExMessages(midi.sysex);
+  }
   std::uint32_t max_frame = 0;
   for (const audio_dbg::SimNoteEvent& e : base) {
     max_frame = std::max(max_frame, e.frame);
@@ -784,7 +807,7 @@ int main(int argc, char** argv) {
       const char* target = (device_tab == 3) ? "gm" : "mt32";
       loadTrackBaseline(engine, enh_mgr, catalog,
                         track_names[static_cast<std::size_t>(track_index)].c_str(),
-                        target);
+                        target, &mt32_dev);
       last_loaded_track = track_index;
       mixer.unlock();
     }
@@ -814,7 +837,7 @@ int main(int argc, char** argv) {
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
                                 track_names[static_cast<std::size_t>(track_index)].c_str(),
-                                target);
+                                target, &mt32_dev);
             }
             engine.syncDeviceState();
             mixer.unlock();

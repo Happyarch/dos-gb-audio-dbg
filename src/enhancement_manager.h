@@ -32,6 +32,10 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -47,6 +51,174 @@ struct RevisionEntry {
   std::string timestamp;
   std::string path;
 };
+
+// A complete Roland DT1 SysEx frame, F0..F7. The MT-32 custom-timbre bridge
+// and the retained SMF SysEx both speak in these.
+using SysExMessages = std::vector<std::vector<std::uint8_t> >;
+
+// Per-song custom-timbre Patch Memory frames: `setup` points patch slots at
+// the custom Timbre Memory records, `cleanup` restores the factory occupants.
+struct SongTimbreSysex {
+  SysExMessages setup;
+  SysExMessages cleanup;
+};
+
+// A parsed standard MIDI file: the note/program/CC stream plus any embedded
+// SysEx frames, retained in encounter order (the SMF reader no longer
+// discards them).
+struct MidiFileData {
+  std::vector<SimNoteEvent> notes;
+  SysExMessages sysex;
+};
+
+// --- Runtime Python bridge mechanics (header-inline) -----------------------
+// `EnhancementManager` and `Mt32Device` share this, and the device-only test
+// binaries link mt32_device.cpp without enhancement_manager.cpp, so the
+// mechanics MUST stay header-inline to avoid a link-time dependency on the
+// manager TU. The wire format is documented in src/enhancement_sysex.py.
+namespace sysex_bridge {
+
+// Same walk-up as SongCatalog/EnhancementManager: $PKMN_REPO_ROOT wins, else
+// walk up to 12 levels looking for constants/music_constants.asm.
+inline std::string findRepoRoot() {
+  std::error_code ec;
+  if (const char* env = std::getenv("PKMN_REPO_ROOT")) {
+    if (std::filesystem::is_regular_file(
+            std::filesystem::path(env) / "constants/music_constants.asm", ec)) {
+      return env;
+    }
+  }
+  std::filesystem::path dir = std::filesystem::current_path(ec);
+  if (ec) return "";
+  for (int i = 0; i < 12; ++i) {
+    if (std::filesystem::is_regular_file(
+            dir / "constants/music_constants.asm", ec)) {
+      return dir.string();
+    }
+    if (!dir.has_parent_path()) break;
+    dir = dir.parent_path();
+  }
+  return "";
+}
+
+// Single-quote a shell argument (repo paths contain spaces; embedded single
+// quotes use the close-quote / escaped-quote / reopen idiom).
+inline std::string shellQuote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'') {
+      out += "'\\''";
+    } else {
+      out += c;
+    }
+  }
+  out += "'";
+  return out;
+}
+
+// <repo>/dos_port/tools/dos-gb-audio-dbg/src/enhancement_sysex.py, with the
+// legacy viewer path as a fallback. Empty when neither exists.
+inline std::string scriptPath(const std::string& repo_root) {
+  std::error_code ec;
+  std::filesystem::path p =
+      std::filesystem::path(repo_root) / "dos_port" / "tools" /
+      "dos-gb-audio-dbg" / "src" / "enhancement_sysex.py";
+  if (std::filesystem::is_regular_file(p, ec)) return p.string();
+  p = std::filesystem::path(repo_root) / "dos_port" / "tools" / "viewer" /
+      "src" / "enhancement_sysex.py";
+  if (std::filesystem::is_regular_file(p, ec)) return p.string();
+  return "";
+}
+
+inline bool parseHexByte(const std::string& tok, std::uint8_t* out) {
+  if (tok.empty() || tok.size() > 2) return false;
+  unsigned v = 0;
+  for (char c : tok) {
+    int d = -1;
+    if (c >= '0' && c <= '9') d = c - '0';
+    else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+    else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+    if (d < 0) return false;
+    v = (v << 4) | static_cast<unsigned>(d);
+  }
+  *out = static_cast<std::uint8_t>(v);
+  return true;
+}
+
+// Runs `python3 enhancement_sysex.py <mode> [song]` and parses the
+// section-delimited SYSEX lines. Either output pointer may be null (that
+// section is then ignored). Returns true only on a well-formed run terminated
+// by END with every SYSEX frame starting F0 and ending F7.
+inline bool run(const std::string& repo_root, const std::string& mode,
+                const std::string& song, SysExMessages* timbres,
+                SongTimbreSysex* song_sysex) {
+  if (timbres != nullptr) timbres->clear();
+  if (song_sysex != nullptr) {
+    song_sysex->setup.clear();
+    song_sysex->cleanup.clear();
+  }
+  if (repo_root.empty()) return false;
+  const std::string script = scriptPath(repo_root);
+  if (script.empty()) return false;
+  std::string cmd = "python3 " + shellQuote(script) + " " + shellQuote(mode);
+  if (!song.empty()) cmd += " " + shellQuote(song);
+  cmd += " 2>/dev/null";
+  FILE* pipe = ::popen(cmd.c_str(), "r");
+  if (pipe == nullptr) return false;
+
+  SysExMessages* section = timbres;
+  bool saw_end = false;
+  bool bad = false;
+  char buf[1024];
+  std::string carry;
+  const auto handleLine = [&](const std::string& line) {
+    std::istringstream ls(line);
+    std::string kind;
+    ls >> kind;
+    if (kind == "TIMBRES") {
+      section = timbres;
+    } else if (kind == "SETUP") {
+      section = song_sysex != nullptr ? &song_sysex->setup : nullptr;
+    } else if (kind == "CLEANUP") {
+      section = song_sysex != nullptr ? &song_sysex->cleanup : nullptr;
+    } else if (kind == "SYSEX") {
+      std::vector<std::uint8_t> msg;
+      std::string tok;
+      bool parsed = true;
+      while (ls >> tok) {
+        std::uint8_t b = 0;
+        if (!parseHexByte(tok, &b)) {
+          parsed = false;
+          break;
+        }
+        msg.push_back(b);
+      }
+      if (parsed && msg.size() >= 2 && msg.front() == 0xF0 &&
+          msg.back() == 0xF7 && section != nullptr) {
+        section->push_back(std::move(msg));
+      } else {
+        bad = true;
+      }
+    } else if (kind == "END") {
+      saw_end = true;
+    } else if (kind == "ERROR") {
+      bad = true;
+    }
+  };
+  while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+    carry += buf;
+    std::size_t nl = 0;
+    while ((nl = carry.find('\n')) != std::string::npos) {
+      handleLine(carry.substr(0, nl));
+      carry.erase(0, nl + 1);
+    }
+  }
+  if (!carry.empty()) handleLine(carry);
+  ::pclose(pipe);
+  return saw_end && !bad;
+}
+
+}  // namespace sysex_bridge
 
 class EnhancementManager {
  public:
@@ -105,11 +277,28 @@ class EnhancementManager {
   // Native SMF type-0/1 parse: note-ons become on/off pairs with exact
   // frame timings. Empty on any parse failure.
   std::vector<SimNoteEvent> loadMidiFile(const std::string& path) const;
+  // Same parse, additionally returning the embedded SysEx frames the reader
+  // used to skip (retained in encounter order).
+  MidiFileData parseMidiFile(const std::string& path) const;
   // assets/midi/<target>/<Song>.mid relative to the repo root.
   std::vector<SimNoteEvent> loadSongBaseline(
       const std::string& song, const std::string& target = "mt32") const;
   std::string midiPathFor(const std::string& song,
                           const std::string& target = "mt32") const;
+
+  // --- MT-32 custom-timbre bridge (delegates to enhancement_sysex.py) ------
+  // The Timbre Memory upload blob from tools/audio/mt32/timbres.yaml via
+  // gen_mt32_patches.build_messages (system=False -- the host --setup path;
+  // the channel-table system write is a full-boot upload MUNT mishandles
+  // live). Sent once at Mt32Device::init(). Empty when the bridge/python3 or
+  // the repo is unavailable.
+  SysExMessages loadTimbreBank() const;
+  // Per-song Patch Memory setup + factory-restore cleanup via
+  // midi_to_stream.find_song_custom_patches + build_song_sysex, keyed by the
+  // pret header label (e.g. "Music_JigglypuffSong"). Both empty when the song
+  // uses no custom timbres (the cleanup of the PREVIOUS track is what clears
+  // the synth for a no-custom track).
+  SongTimbreSysex loadSongTimbreSysex(const std::string& song) const;
 
  private:
   std::string revisionDirFor(const std::string& song) const;
