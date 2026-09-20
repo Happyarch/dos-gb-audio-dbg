@@ -6,14 +6,15 @@
 //     3. Muted Note-On is pre-synth filtered (no voice allocated).
 //     4. MT-32 timbre name resolution (anchors + full-table coverage).
 //     5. Master + per-channel rendering; dormant fast escape (sentinel
-//        zeros); mute gating on both paths.
+//        zeros); mute silencing on both paths.
 //     6. LCD readout (non-empty; mock display SysEx updates it).
 //     7. Partial/part telemetry bounds.
 //   GM (GmDevice + libfluidsynth, real SoundFont or mock fallback):
 //     1. Fresh dormancy; init() succeeds with or without a SoundFont.
 //     2. Note dispatch + program/CC reflection.
 //     3. GM 128 patch name resolution (anchors + full-table coverage).
-//     4. Master + per-channel rendering; dormant fast escape; mute gating.
+//     4. Master + per-channel rendering; dormant fast escape; mute
+//        silencing.
 // Headless: no GUI, no audio hardware. Exits 0 with ALL PASS, 1 on failure.
 
 #include <cmath>
@@ -181,12 +182,12 @@ int main() {
       CHECK(allZero(stems[static_cast<std::size_t>(ch)].data(), kFrames));
     }
 
-    // Mute stops new voices (pre-synth filter) and lets the held voice
-    // release: the MT-32 captures part volume at note start, so the CC7
-    // render gate only silences subsequently triggered notes (measured:
-    // muting a held piano leaves it at full level — authentic hardware
-    // behavior). The deterministic post-mute property is native
-    // telemetry: after note-off + reset + drains, no partial is active.
+    // Mute is the pre-synth filter (no voice is allocated for a muted
+    // Note-On) plus an immediate silenceChannel() that closes held keys
+    // and sends CC123/CC120 -- never CC7, which on the MT-32 is a
+    // part-volume write captured at note start, not a mute. The
+    // deterministic post-mute property is native telemetry: after
+    // note-off + reset + drains, no partial is active.
     dev.setMute(1, true);
     CHECK(!dev.noteOn(1, 62, 100));  // Filtered: returns false.
     CHECK(!dev.isNoteSounding(1, 62));
@@ -202,17 +203,16 @@ int main() {
                 unmuted_peak);
   }
 
-  // --- MT-32: mute gate silences subsequently triggered voices ------------
+  // --- MT-32: muted channel stays silent even on direct dispatch ----------
   {
     Mt32Device dev;
     CHECK(dev.init());
     dev.setMute(1, true);
-    // Flush the CC7=0 part volume into the engine BEFORE allocating: the
-    // gate is captured at note start. Direct dispatch bypasses the
-    // pre-synth filter so a voice is allocated despite the mute.
-    // No prior audio exists, so no reverb tail can leak. The mock mixer is
-    // exact zero; live Munt keeps the gated voice ~150x below its unmuted
-    // peak (measured 7.6e-4 vs 1.2e-1).
+    // Mute never rides CC7: it is the pre-synth Note-On filter plus
+    // silenceChannel() (Note-Off/CC123/CC120). dispatchNoteOn() applies
+    // the same filter as defense in depth, so a direct dispatch allocates
+    // no voice. No prior audio exists, so no reverb tail can leak; the
+    // mock mixer is exact zero.
     std::vector<float> flush(kFrames, 0.0f);
     dev.render(flush.data(), kFrames);
     dev.dispatchNoteOn(1, 60, 110);
@@ -341,10 +341,10 @@ int main() {
       CHECK(allZero(stems[static_cast<std::size_t>(ch)].data(), kFrames));
     }
 
-    // Mute gates the voice out of the master mix. FluidSynth applies the
-    // CC7 gate up to a block late and its reverb tail still rings, so
-    // render one throwaway block, then require the next to be a small
-    // fraction of the unmuted peak.
+    // Mute silences the held voice: setMute() calls silenceChannel()
+    // (Note-Off/CC123/CC120, never CC7). Render one throwaway block for
+    // FluidSynth's release/reverb tail, then require the next to be a
+    // small fraction of the unmuted peak.
     dev.setMute(2, true);
     std::vector<float> muted(kFrames, 9.0f);
     dev.render(muted.data(), kFrames);
@@ -358,16 +358,16 @@ int main() {
                 unmuted_peak);
   }
 
-  // --- GM: mute gating is near-absolute with no reverb tail -----------------
+  // --- GM: muted channel stays near-absolute silent -------------------------
   {
     GmDevice dev;
     CHECK(dev.init());
     dev.setMute(2, true);
-    // Direct dispatch bypasses the pre-synth filter and allocates a voice
-    // on the muted channel; the CC7 render gate must still silence it.
-    // No prior audio exists, so no reverb tail can leak. The mock mixer is
-    // exact zero; live FluidSynth keeps residuals below 1e-3 (measured
-    // 8.1e-5: the muted voice's effect sends tap pre-volume).
+    // Mute never rides CC7: it is the pre-synth Note-On filter plus
+    // silenceChannel() (Note-Off/CC123/CC120). dispatchNoteOn() applies
+    // the same filter, so a direct dispatch allocates no voice. No prior
+    // audio exists, so no reverb tail can leak; the mock mixer is exact
+    // zero and live FluidSynth stays below the 1e-3 check threshold.
     dev.dispatchNoteOn(2, 64, 110);
     std::vector<float> master(kFrames, 9.0f);
     dev.render(master.data(), kFrames);

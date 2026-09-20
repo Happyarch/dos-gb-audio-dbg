@@ -111,8 +111,8 @@ set(GB_APU_DIR "" CACHE PATH "Directory containing Gb_Snd_Emu (Basic_Gb_Apu.cpp)
 if(NOT NUKEDOPL_DIR)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nukedopl/nukedopl.cpp")
     set(NUKEDOPL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/nukedopl")
-  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos/dos_port/tools/dosbox-x/src/hardware/nukedopl.cpp")
-    set(NUKEDOPL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos/dos_port/tools/dosbox-x/src/hardware")
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../dos_port/tools/dosbox-x/src/hardware/nukedopl.cpp")
+    set(NUKEDOPL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../dos_port/tools/dosbox-x/src/hardware")
   else()
     FetchContent_Declare(
       nukedopl_fast
@@ -130,8 +130,8 @@ endif()
 if(NOT GB_APU_DIR)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/gb_snd_emu/Basic_Gb_Apu.cpp")
     set(GB_APU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/gb_snd_emu")
-  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos/dos_port/tools/audio/.gb_snd_emu/Basic_Gb_Apu.cpp")
-    set(GB_APU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos/dos_port/tools/audio/.gb_snd_emu")
+  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../dos_port/tools/audio/.gb_snd_emu/Basic_Gb_Apu.cpp")
+    set(GB_APU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../dos_port/tools/audio/.gb_snd_emu")
   else()
     FetchContent_Declare(
       gb_snd_emu
@@ -406,10 +406,12 @@ target_include_directories(pkmn-audio-dbg-session-tests PRIVATE
 # regardless of the CWD ctest runs from.
 set(PKMN_REPO_ROOT_ABS "" CACHE PATH "Path to Pokemon Yellow repository root for test data")
 if(NOT PKMN_REPO_ROOT_ABS)
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos/constants")
-    set(PKMN_REPO_ROOT_ABS "${CMAKE_CURRENT_SOURCE_DIR}/../pokeyellow_msdos")
-  elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../pokeyellow_msdos/constants")
-    set(PKMN_REPO_ROOT_ABS "${CMAKE_CURRENT_SOURCE_DIR}/../../pokeyellow_msdos")
+  # This project sits at <repo>/dos_port/tools/dos-gb-audio-dbg, so the
+  # Pokemon Yellow repo root (holding constants/ and audio/headers/) is three
+  # levels up. Named `pokeyellow_msdos` probes used to be wrong here: the
+  # submodule is nested inside the parent repo, not beside a sibling copy.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../constants")
+    set(PKMN_REPO_ROOT_ABS "${CMAKE_CURRENT_SOURCE_DIR}/../../..")
   endif()
 endif()
 target_compile_definitions(pkmn-audio-dbg-session-tests PRIVATE

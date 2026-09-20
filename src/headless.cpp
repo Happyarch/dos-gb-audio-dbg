@@ -25,6 +25,8 @@ namespace {
 
 constexpr std::uint8_t kNoteOnOpcode = 0x90;
 constexpr std::uint8_t kNoteOffOpcode = 0x80;
+constexpr std::uint8_t kProgramChangeOpcode = 0xC0;
+constexpr std::uint8_t kControlChangeOpcode = 0xB0;
 
 // Expands mono device PCM to stereo-interleaved (L == R) for the WAV writer.
 void monoToStereo(const float* mono, std::size_t n, std::vector<float>* out) {
@@ -101,15 +103,28 @@ std::uint64_t totalSamplesFor(std::uint32_t rate, std::uint32_t frames) {
 void dispatchReplayEvent(SoundDevice* dev, std::uint8_t opcode,
                          const std::uint8_t* payload, std::size_t len) {
   if (dev == nullptr) return;
-  if (opcode == kNoteOnOpcode && payload != nullptr && len >= 3) {
-    if (MidiDevice* midi = dynamic_cast<MidiDevice*>(dev)) {
-      midi->noteOn(payload[0], payload[1], payload[2]);
-      return;
-    }
-  } else if (opcode == kNoteOffOpcode && payload != nullptr && len >= 2) {
-    if (MidiDevice* midi = dynamic_cast<MidiDevice*>(dev)) {
-      midi->noteOff(payload[0], payload[1]);
-      return;
+  // MIDI backends get the concrete note/program/CC API, exactly like
+  // SessionEngine::dispatch(): a replayed track must apply its Program
+  // Change (0xC0) and Control Change (0xB0) events, not just notes, or the
+  // patches/volume/pan the capture carried are silently dropped.
+  if (MidiDevice* midi = dynamic_cast<MidiDevice*>(dev)) {
+    if (payload != nullptr) {
+      if (opcode == kNoteOnOpcode && len >= 3) {
+        midi->noteOn(payload[0], payload[1], payload[2]);
+        return;
+      }
+      if (opcode == kNoteOffOpcode && len >= 2) {
+        midi->noteOff(payload[0], payload[1]);
+        return;
+      }
+      if (opcode == kProgramChangeOpcode && len >= 2) {
+        midi->programChange(payload[0], payload[1]);
+        return;
+      }
+      if (opcode == kControlChangeOpcode && len >= 3) {
+        midi->sendControlChange(payload[0], payload[1], payload[2]);
+        return;
+      }
     }
   }
   dev->handleCommand(opcode, payload, len);
