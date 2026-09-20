@@ -127,8 +127,10 @@ void GbApuTab::drawChannelStrips(const DeviceSnapshot& s) {
   // 4 channel cards: type name + frequency/volume, dormant fast escape.
   for (int ch = 0; ch < kChannels; ++ch) {
     if (ch >= static_cast<int>(s.channels.size())) break;
+    ImGui::PushID(ch);
     if (s.channels[static_cast<std::size_t>(ch)].dormant) {
       ImGui::TextDisabled("%s dormant", channelLabel(ch).c_str());
+      ImGui::PopID();
       continue;
     }
     const ChannelCard c = channelCard(ch);
@@ -136,6 +138,7 @@ void GbApuTab::drawChannelStrips(const DeviceSnapshot& s) {
                 c.frequency, c.volume, envelopeName(c.envelope));
     ImGui::SameLine();
     if (ImGui::SmallButton(muteLabel(c.muted))) onMuteClick(ch);
+    ImGui::PopID();
   }
 }
 

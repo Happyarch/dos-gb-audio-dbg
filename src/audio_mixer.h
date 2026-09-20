@@ -133,6 +133,11 @@ class AudioMixer {
 
   mutable std::mutex ring_mutex_;
   WaveformRing master_ring_{65536};
+
+  mutable std::mutex resample_mutex_;
+  double resample_phase_ = 0.0;
+  std::vector<float> resample_fifo_;
+  std::size_t fifo_head_ = 0;
 };
 
 }  // namespace audio_dbg

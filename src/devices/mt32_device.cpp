@@ -262,6 +262,10 @@ void Mt32Device::dispatchProgramChange(int ch, int program) {
   synth_->playMsgNow(msg);
 }
 
+void Mt32Device::sendControlChange(int ch, int cc, int value) {
+  dispatchControlChange(ch, cc, value);
+}
+
 void Mt32Device::dispatchControlChange(int ch, int cc, int value) {
   if (!chInRange(ch) || cc < 0 || cc > 127) return;
   setControlChange(ch, cc, value);
@@ -445,20 +449,49 @@ void Mt32Device::render(float* buf, std::size_t frames) {
     renderMockMono(buf, frames, -1);
     return;
   }
-  // Converge engine volumes to the mute matrix BEFORE the idle fast
-  // escape: a skipped block must still flush pending mute/unmute/CC
-  // changes, otherwise voices allocated afterwards are born under a stale
-  // matrix (the MT-32 captures part volume at note start).
-  restoreVolumes();
-  if (!synth_->isActive()) {
-    // Fast escape: no partials, no queued events, no reverb tail.
-    std::memset(buf, 0, frames * sizeof(float));
-    return;
-  }
-  // Single main mix; engine volumes already match the matrix, so muted/
-  // solo-excluded channels contribute silence (newly triggered voices —
-  // the MT-32 captures volume at note start) while held voices decay.
   renderSynthMono(buf, frames);
+}
+
+void Mt32Device::setMute(int ch, bool muted) {
+  MidiDevice::setMute(ch, muted);
+  restoreVolumes();
+}
+
+void Mt32Device::setSolo(int ch, bool soloed) {
+  MidiDevice::setSolo(ch, soloed);
+  restoreVolumes();
+}
+
+const char* Mt32Device::patchName(int part) const {
+  if (part == 8) return "Rhythm Channel";
+  if (synth_ != nullptr && synth_open_ && !mock_) {
+    const char* name =
+        synth_->getPatchName(static_cast<MT32Emu::Bit8u>(part));
+    if (name != nullptr && name[0] != '\0') return name;
+  }
+  const int ch = (part == 8) ? kRhythmChannel : part + 1;
+  return mt32TimbreName(program(ch));
+}
+
+int Mt32Device::getPlayingNotes(int part, std::uint8_t* keys,
+                                std::uint8_t* velocities) const {
+  if (part < 0 || part >= kParts) return 0;
+  if (synth_ != nullptr && synth_open_ && !mock_) {
+    return static_cast<int>(synth_->getPlayingNotes(
+        static_cast<MT32Emu::Bit8u>(part), keys, velocities));
+  }
+  // Mock / fallback: read from MidiDevice note tracking.
+  const int ch = (part == 8) ? kRhythmChannel : part + 1;
+  int count = 0;
+  for (int note = 0; note < kNotesPerChannel && count < 32; ++note) {
+    if (isNoteSounding(ch, note)) {
+      if (keys != nullptr) keys[count] = static_cast<std::uint8_t>(note);
+      if (velocities != nullptr)
+        velocities[count] = static_cast<std::uint8_t>(noteVelocity(ch, note));
+      ++count;
+    }
+  }
+  return count;
 }
 
 void Mt32Device::renderPerChannel(float** bufs, std::size_t frames) {

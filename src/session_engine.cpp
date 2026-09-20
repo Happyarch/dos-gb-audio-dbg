@@ -42,6 +42,7 @@ void SessionEngine::stop() {
   is_stopped_ = true;
   current_frame_ = 0;
   silenceActiveDevice();
+  syncDeviceState();
 }
 
 void SessionEngine::seekToFrame(std::uint32_t target) {
@@ -49,6 +50,7 @@ void SessionEngine::seekToFrame(std::uint32_t target) {
     target = total_frames_;
   }
   current_frame_ = target;
+  syncDeviceState();
 }
 
 void SessionEngine::setLoop(std::uint32_t start, std::uint32_t end) {
@@ -60,6 +62,7 @@ void SessionEngine::setActiveDevice(SoundDevice* dev) {
   if (dev == active_device_) return;
   silenceActiveDevice();  // Outgoing device: no stuck notes.
   active_device_ = dev;   // Frame counter untouched (A/B locking).
+  syncDeviceState();
 }
 
 void SessionEngine::rebuildActive() {
@@ -125,6 +128,7 @@ void SessionEngine::setEvents(std::vector<SimNoteEvent> events) {
   std::stable_sort(slot_events_[slotIndex(active_slot_)].begin(),
                    slot_events_[slotIndex(active_slot_)].end(), eventLess);
   rebuildActive();
+  syncDeviceState();
 }
 
 void SessionEngine::addEvent(const SimNoteEvent& ev) {
@@ -174,6 +178,10 @@ void SessionEngine::dispatch(const SimNoteEvent& ev) {
       midi->programChange(ev.channel, ev.note);
       return;
     }
+    if (ev.type == SimEventType::ControlChange) {
+      midi->sendControlChange(ev.channel, ev.note, ev.velocity);
+      return;
+    }
     if (ev.is_note_on) {
       midi->noteOn(ev.channel, ev.note, ev.velocity);
     } else {
@@ -219,6 +227,35 @@ void SessionEngine::tick() {
     is_paused_ = false;
     is_stopped_ = true;
     silenceActiveDevice();
+    syncDeviceState();
+  }
+}
+
+void SessionEngine::syncDeviceState() {
+  if (active_device_ == nullptr) return;
+  const std::uint32_t max_f = current_frame_;
+  if (MidiDevice* midi = dynamic_cast<MidiDevice*>(active_device_)) {
+    int progs[16];
+    int vols[16];
+    int pans[16];
+    std::fill_n(progs, 16, -1);
+    std::fill_n(vols, 16, -1);
+    std::fill_n(pans, 16, -1);
+    for (const SimNoteEvent& ev : events_) {
+      if (ev.frame > max_f) break;
+      if (ev.channel >= 16) continue;
+      if (ev.type == SimEventType::ProgramChange) {
+        progs[ev.channel] = ev.note;
+      } else if (ev.type == SimEventType::ControlChange) {
+        if (ev.note == 7) vols[ev.channel] = ev.velocity;
+        else if (ev.note == 10) pans[ev.channel] = ev.velocity;
+      }
+    }
+    for (int ch = 0; ch < 16; ++ch) {
+      if (progs[ch] >= 0) midi->programChange(ch, progs[ch]);
+      if (vols[ch] >= 0) midi->sendControlChange(ch, 7, vols[ch]);
+      if (pans[ch] >= 0) midi->sendControlChange(ch, 10, pans[ch]);
+    }
   }
 }
 

@@ -70,6 +70,7 @@ class MidiDevice : public SoundDevice {
   int program(int ch) const;
   void setPitchBend(int ch, int value);  // 0..16383, 8192 = centre.
   int pitchBend(int ch) const;
+  virtual void sendControlChange(int ch, int cc, int value);
   void setControlChange(int ch, int cc, int value);  // cc 0..127.
   int controlChange(int ch, int cc) const;
 

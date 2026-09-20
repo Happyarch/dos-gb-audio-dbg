@@ -192,6 +192,10 @@ int MidiDevice::pitchBend(int ch) const {
   return pitch_bends_[static_cast<std::size_t>(ch)];
 }
 
+void MidiDevice::sendControlChange(int ch, int cc, int value) {
+  setControlChange(ch, cc, value);
+}
+
 void MidiDevice::setControlChange(int ch, int cc, int value) {
   if (!midiValid(ch) || cc < 0 || cc > 127) return;
   wakeChannel(ch);

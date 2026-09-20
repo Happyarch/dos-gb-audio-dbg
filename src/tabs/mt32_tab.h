@@ -85,6 +85,9 @@ class Mt32Tab : public MidiTab {
   // Mute toggle addressed by part index (maps onto the part's channel).
   void onPartMuteClick(int part);
 
+  // MUNT-QT parity pitch scale drawing live part notes.
+  void drawPartPitchScale(ImDrawList* dl, ImVec2 origin, ImVec2 size, int part);
+
   // Headless probe: buffered scope samples for a channel.
   std::size_t testWaveSize(int ch) const { return waveSize(ch); }
 

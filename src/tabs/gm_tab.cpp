@@ -70,10 +70,12 @@ void GmTab::drawChannelStrips(const DeviceSnapshot& s) {
   }
   // 16 rows, one per MIDI channel. Dormant channels take the fast escape.
   for (int ch = 0; ch < kChannels; ++ch) {
+    ImGui::PushID(ch);
     const ChannelStrip cs = channelStrip(s, ch);
     const std::string label = channelLabel(ch);
     if (cs.dormant) {
       ImGui::TextDisabled("%s dormant", label.c_str());
+      ImGui::PopID();
       continue;
     }
     // Activity LED: lit while notes sound on the channel.
@@ -120,6 +122,7 @@ void GmTab::drawChannelStrips(const DeviceSnapshot& s) {
     ImGui::Text("v:%.2f p:%+.2f", cs.volume, cs.pan);
     ImGui::SameLine();
     ImGui::ProgressBar(cs.peak, ImVec2(60.0f, 0.0f));
+    ImGui::PopID();
   }
 }
 

@@ -422,7 +422,13 @@ void GbApuDevice::applyRegister(int ch) {
 void GbApuDevice::handleCommand(std::uint8_t opcode,
                                 const std::uint8_t* payload, std::size_t len) {
   if (payload == nullptr || len == 0 || !inited_) return;
-  const int ch = static_cast<int>(payload[0]) % kChannels;
+  const int raw_ch = static_cast<int>(payload[0]);
+  int ch = 0;
+  if (raw_ch == 9) ch = 3;       // MIDI drums (ch 9) -> GB Noise (ch 3)
+  else if (raw_ch == 3) ch = 2;  // MIDI ch 3 -> GB Wave (ch 2)
+  else if (raw_ch == 2) ch = 1;  // MIDI ch 2 -> GB Pulse 2 (ch 1)
+  else if (raw_ch == 1 || raw_ch == 0) ch = 0; // MIDI ch 1 / 0 -> GB Pulse 1 (ch 0)
+  else ch = raw_ch % kChannels;
   wakeChannel(ch);
 
   if (opcode == 0x90 && len >= 3) {
@@ -431,15 +437,12 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
     if (vel == 0) {
       if (ch == 0) {
         writeRegister(0xFF12, 0x00);
-        writeRegister(0xFF14, 0x80);
       } else if (ch == 1) {
         writeRegister(0xFF17, 0x00);
-        writeRegister(0xFF19, 0x80);
       } else if (ch == 2) {
-        writeRegister(0xFF1A, 0x00);
+        writeRegister(0xFF1C, 0x00);
       } else if (ch == 3) {
         writeRegister(0xFF21, 0x00);
-        writeRegister(0xFF23, 0x80);
       }
       channel(ch).active = false;
       return;
@@ -498,15 +501,12 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
   } else if (opcode == 0x80) {
     if (ch == 0) {
       writeRegister(0xFF12, 0x00);
-      writeRegister(0xFF14, 0x80);
     } else if (ch == 1) {
       writeRegister(0xFF17, 0x00);
-      writeRegister(0xFF19, 0x80);
     } else if (ch == 2) {
-      writeRegister(0xFF1A, 0x00);
+      writeRegister(0xFF1C, 0x00);
     } else if (ch == 3) {
       writeRegister(0xFF21, 0x00);
-      writeRegister(0xFF23, 0x80);
     }
     channel(ch).active = false;
   }
@@ -588,7 +588,8 @@ std::size_t GbApuDevice::drainApu(GbVoiceApu* apu, float* out,
           static_cast<float>(tmp[i * 2]) / 32768.0f;
       const float r =
           static_cast<float>(tmp[i * 2 + 1]) / 32768.0f;
-      out[done++] = (l + r) * 0.5f;
+      constexpr float kGbLevelScale = 0.55f;
+      out[done++] = (l + r) * 0.5f * kGbLevelScale;
     }
   }
   return done;

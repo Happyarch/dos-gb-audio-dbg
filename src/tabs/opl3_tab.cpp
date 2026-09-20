@@ -83,9 +83,11 @@ void Opl3Tab::drawChannelStrips(const DeviceSnapshot& s) {
   // 18-voice grid: dormant voices take the fast escape (label only).
   for (int v = 0; v < kVoices; ++v) {
     if (v >= static_cast<int>(s.channels.size())) break;
+    ImGui::PushID(v);
     const ChannelState& c = s.channels[static_cast<std::size_t>(v)];
     if (c.dormant) {
       ImGui::TextDisabled("%s dormant", voiceLabel(v));
+      ImGui::PopID();
       continue;
     }
     const VoiceView vv = voiceView(v);
@@ -94,6 +96,7 @@ void Opl3Tab::drawChannelStrips(const DeviceSnapshot& s) {
                 vv.connection == 0 ? "SerialFM" : "Parallel");
     ImGui::SameLine();
     if (ImGui::SmallButton(muteLabel(c.muted))) onMuteClick(v);
+    ImGui::PopID();
   }
 }
 

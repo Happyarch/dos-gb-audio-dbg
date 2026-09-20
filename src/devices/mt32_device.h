@@ -84,6 +84,8 @@ class Mt32Device : public MidiDevice {
   void reset() override;
   void render(float* buf, std::size_t frames) override;
   void renderPerChannel(float** bufs, std::size_t frames) override;
+  void setMute(int ch, bool muted) override;
+  void setSolo(int ch, bool soloed) override;
 
   // --- MidiDevice voice hooks (synth writes live here) ---
   // Called only for non-filtered notes, so muted channels allocate nothing.
@@ -92,6 +94,7 @@ class Mt32Device : public MidiDevice {
 
   // --- Synth-reaching program/CC/SysEx (update base + forward) ---
   void programChange(int ch, int program) override;
+  void sendControlChange(int ch, int cc, int value) override;
   void dispatchProgramChange(int ch, int program);
   void dispatchControlChange(int ch, int cc, int value);
   void dispatchSysEx(const std::uint8_t* data, std::size_t len);
@@ -112,6 +115,10 @@ class Mt32Device : public MidiDevice {
   // note on the mapped channel (part p <-> channel p+1, rhythm <-> ch 9).
   bool partActive(int part) const;
   std::string lcdText() const;
+
+  // --- Part / voice queries (MUNT-QT parity) ---
+  const char* patchName(int part) const;
+  int getPlayingNotes(int part, std::uint8_t* keys, std::uint8_t* velocities) const;
 
   // --- Mode queries ---
   bool isMock() const { return mock_; }

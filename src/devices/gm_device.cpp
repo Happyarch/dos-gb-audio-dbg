@@ -199,6 +199,10 @@ void GmDevice::dispatchProgramChange(int ch, int program) {
   fluid_synth_program_change(synth_, ch, MidiDevice::program(ch));
 }
 
+void GmDevice::sendControlChange(int ch, int cc, int value) {
+  dispatchControlChange(ch, cc, value);
+}
+
 void GmDevice::dispatchControlChange(int ch, int cc, int value) {
   if (!chInRange(ch) || cc < 0 || cc > 127) return;
   setControlChange(ch, cc, value);

@@ -42,14 +42,15 @@ enum class ComparisonSlot { A = 0, B = 1 };
 enum class SimEventType : std::uint8_t {
   Note = 0,
   ProgramChange = 1,
+  ControlChange = 2,
 };
 
 // One simulated GB sound-driver voice event, stamped on the 60 Hz grid.
 struct SimNoteEvent {
   std::uint32_t frame = 0;       // Frame on which this event fires.
   std::uint8_t channel = 0;      // Driver channel (0-based).
-  std::uint8_t note = 60;        // MIDI note number (or program number if ProgramChange).
-  std::uint8_t velocity = 100;   // 1..127.
+  std::uint8_t note = 60;        // MIDI note number (or program number if ProgramChange, CC controller if ControlChange).
+  std::uint8_t velocity = 100;   // 1..127 (or CC value if ControlChange).
   std::uint16_t duration_frames = 0;  // Informational hold length; the
                                       // matching note-off is a separate
                                       // event (see addNote()).
@@ -58,7 +59,8 @@ struct SimNoteEvent {
 };
 
 inline int eventPriority(const SimNoteEvent& ev) {
-  if (ev.type == SimEventType::ProgramChange) return 0;
+  if (ev.type == SimEventType::ProgramChange ||
+      ev.type == SimEventType::ControlChange) return 0;
   if (!ev.is_note_on) return 1;
   return 2;
 }
@@ -86,6 +88,7 @@ class SessionEngine {
   // silences the outgoing device (MidiDevice::allNotesOff).
   void setActiveDevice(SoundDevice* dev);
   SoundDevice* activeDevice() const { return active_device_; }
+  void syncDeviceState();
 
   // --- A/B comparison slots + enhancement overlay (Stage 5.4) ---
   // Each slot owns an event list; the dispatched stream is the active

@@ -68,22 +68,6 @@ constexpr Uint32 kFrameBudgetMs = 16;
 constexpr const char* kDeviceTabs[] = {"OPL3", "GB-APU", "MT-32",
                                        "General MIDI"};
 
-// Stage 7.7: per-frame scope feed so the active tab's carrier/channel
-// oscilloscopes trace live audio. Renders a small block from the active
-// device and pushes each channel into the active tab; dormant channels
-// take the fast escape on both sides (no chip stepping, no storage).
-void feedScopes(audio_dbg::SoundDevice* dev, audio_dbg::DeviceTab* tab) {
-  if (dev == nullptr || tab == nullptr) return;
-  const int n = dev->channelCount();
-  if (n <= 0 || n > 32) return;
-  constexpr std::size_t kScopeFrames = 64;
-  float tmp[32][64];
-  float* ptrs[32];
-  for (int i = 0; i < n; ++i) ptrs[i] = tmp[i];
-  dev->renderPerChannel(ptrs, kScopeFrames);
-  for (int i = 0; i < n; ++i) tab->pushWaveformData(i, ptrs[i], kScopeFrames);
-}
-
 // Stage 7.7: builds the driver-simulation view for the tracker from the
 // engine's dispatched stream: note-ons stamped at the current frame become
 // active SimNotes. Chip state comes from the device snapshot at draw time.
@@ -136,11 +120,12 @@ audio_dbg::SimState buildSimState(const audio_dbg::SessionEngine& engine) {
 // layer when the python bridge resolves one.
 void loadTrackBaseline(audio_dbg::SessionEngine& engine,
                        audio_dbg::EnhancementManager& enh_mgr,
-                       audio_dbg::SongCatalog& catalog, const char* constant) {
+                       audio_dbg::SongCatalog& catalog, const char* constant,
+                       const char* target = "mt32") {
   const audio_dbg::SongInfo* info = catalog.findTrack(constant);
   if (info == nullptr) return;
   std::vector<audio_dbg::SimNoteEvent> base =
-      enh_mgr.loadSongBaseline(info->header_label, "mt32");
+      enh_mgr.loadSongBaseline(info->header_label, target);
   if (base.empty()) return;
   std::uint32_t max_frame = 0;
   for (const audio_dbg::SimNoteEvent& e : base) {
@@ -152,7 +137,7 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   engine.setLoop(0, 0);
   enh_mgr.watchSong(info->header_label);
   std::vector<audio_dbg::SimNoteEvent> enh =
-      enh_mgr.compileEnhancement(info->header_label, "mt32");
+      enh_mgr.compileEnhancement(info->header_label, target);
   engine.setEnhancementEvents(std::move(enh));
 }
 
@@ -221,9 +206,13 @@ int main(int argc, char** argv) {
   }
 
   // --- SDL2: Video + Audio --------------------------------------------------
+  SDL_setenv("SDL_AUDIODRIVER", "pipewire", 1);
   if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
-    std::fprintf(stderr, "pkmn-audio-dbg: SDL_Init failed: %s\n", SDL_GetError());
-    return 1;
+    SDL_setenv("SDL_AUDIODRIVER", "", 1);
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+      std::fprintf(stderr, "pkmn-audio-dbg: SDL_Init failed: %s\n", SDL_GetError());
+      return 1;
+    }
   }
 
   // Request an OpenGL 3.0 core context for the ImGui OpenGL3 backend.
@@ -459,14 +448,6 @@ int main(int argc, char** argv) {
     }
     transport.advance(engine);
 
-    // Stage 7.7: live scope feed for the active tab (dormant fast escape
-    // keeps idle voices/channels at zero cost).
-    // Note: MT-32 and GM backends have no carrier/voice oscilloscopes, and
-    // Mt32Device rendering stems steals output samples. Only feed scopes on
-    // OPL3 (tab 0) and GB-APU (tab 1).
-    if (device_tab == 0 || device_tab == 1) {
-      feedScopes(devices[device_tab], tabs[device_tab]);
-    }
     mixer.unlock();
 
     ImGui_ImplOpenGL3_NewFrame();
@@ -653,8 +634,10 @@ int main(int argc, char** argv) {
     if (track_index != last_loaded_track && track_index >= 0 &&
         track_index < static_cast<int>(track_names.size())) {
       mixer.lock();
+      const char* target = (device_tab == 3) ? "gm" : "mt32";
       loadTrackBaseline(engine, enh_mgr, catalog,
-                        track_names[static_cast<std::size_t>(track_index)].c_str());
+                        track_names[static_cast<std::size_t>(track_index)].c_str(),
+                        target);
       last_loaded_track = track_index;
       mixer.unlock();
     }
@@ -679,6 +662,13 @@ int main(int argc, char** argv) {
             device_tab = i;
             engine.setActiveDevice(devices[i]);
             mixer.setDevice(devices[i], device_rates[i]);
+            const char* target = (device_tab == 3) ? "gm" : "mt32";
+            if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
+              loadTrackBaseline(engine, enh_mgr, catalog,
+                                track_names[static_cast<std::size_t>(track_index)].c_str(),
+                                target);
+            }
+            engine.syncDeviceState();
             mixer.unlock();
           }
           const audio_dbg::DeviceSnapshot snap = devices[i]->snapshot();

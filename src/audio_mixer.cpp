@@ -26,6 +26,7 @@ bool AudioMixer::init(int output_rate, int buffer_frames, bool disabled) {
     open_ = true;
     return true;
   }
+  SDL_setenv("SDL_AUDIODRIVER", "pipewire", 1);
   SDL_AudioSpec want;
   SDL_zero(want);
   want.freq = output_rate_;
@@ -73,6 +74,10 @@ void AudioMixer::setDevice(SoundDevice* dev, int device_rate) {
   device_.store(dev);
   if (device_rate <= 0) device_rate = output_rate_;
   device_rate_.store(device_rate);
+  std::lock_guard<std::mutex> lock(resample_mutex_);
+  resample_phase_ = 0.0;
+  resample_fifo_.clear();
+  fifo_head_ = 0;
 }
 
 void AudioMixer::setDeviceChannelMute(int ch, bool muted) {
@@ -151,23 +156,45 @@ void AudioMixer::renderBlock(float* stereo_out, std::size_t frames) {
         for (std::size_t i = 0; i < frames; ++i) mono[i] *= gain;
       }
     } else {
-      const std::size_t dev_frames =
+      std::lock_guard<std::mutex> lock(resample_mutex_);
+      const double ratio =
+          static_cast<double>(dev_rate) / static_cast<double>(out_rate);
+      if (fifo_head_ > 0) {
+        resample_fifo_.erase(resample_fifo_.begin(),
+                             resample_fifo_.begin() + fifo_head_);
+        fifo_head_ = 0;
+      }
+      const std::size_t needed =
           static_cast<std::size_t>(
-              (static_cast<double>(frames) * static_cast<double>(dev_rate) /
-               static_cast<double>(out_rate))) +
-          2;
-      std::vector<float> dev_buf(dev_frames, 0.0f);
-      dev->render(dev_buf.data(), dev_frames);
-      resampleLinear(dev_buf.data(), dev_frames, mono.data(), frames);
-      if (gain != 1.0f) {
-        for (std::size_t i = 0; i < frames; ++i) mono[i] *= gain;
+              std::ceil(static_cast<double>(frames) * ratio)) + 4;
+      if (resample_fifo_.size() < needed) {
+        const std::size_t to_render = needed - resample_fifo_.size();
+        std::vector<float> dev_chunk(to_render, 0.0f);
+        dev->render(dev_chunk.data(), to_render);
+        resample_fifo_.insert(resample_fifo_.end(), dev_chunk.begin(),
+                              dev_chunk.end());
+      }
+      for (std::size_t i = 0; i < frames; ++i) {
+        if (fifo_head_ >= resample_fifo_.size()) break;
+        const float s0 = resample_fifo_[fifo_head_];
+        const float s1 = (fifo_head_ + 1 < resample_fifo_.size())
+                             ? resample_fifo_[fifo_head_ + 1]
+                             : s0;
+        mono[i] =
+            (s0 + (s1 - s0) * static_cast<float>(resample_phase_)) * gain;
+        resample_phase_ += ratio;
+        while (resample_phase_ >= 1.0) {
+          resample_phase_ -= 1.0;
+          ++fifo_head_;
+        }
       }
     }
   }  // else: silence (muted or deviceless).
 
   for (std::size_t i = 0; i < frames; ++i) {
-    stereo_out[i * 2] = mono[i];
-    stereo_out[i * 2 + 1] = mono[i];
+    const float val = std::clamp(mono[i], -1.0f, 1.0f);
+    stereo_out[i * 2] = val;
+    stereo_out[i * 2 + 1] = val;
   }
   pushMasterRing(mono.data(), frames);
   Recorder* rec = recorder_.load();
@@ -231,8 +258,9 @@ void AudioMixer::renderStemsBlock(float* stereo_out, std::size_t frames) {
   }  // else: silence (stems stay zeroed).
 
   for (std::size_t i = 0; i < frames; ++i) {
-    stereo_out[i * 2] = mono[i];
-    stereo_out[i * 2 + 1] = mono[i];
+    const float val = std::clamp(mono[i], -1.0f, 1.0f);
+    stereo_out[i * 2] = val;
+    stereo_out[i * 2 + 1] = val;
   }
   pushMasterRing(mono.data(), frames);
   Recorder* rec = recorder_.load();

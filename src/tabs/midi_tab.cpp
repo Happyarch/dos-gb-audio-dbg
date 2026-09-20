@@ -97,9 +97,11 @@ void MidiTab::drawChannelStrips(const DeviceSnapshot& s) {
   // keyboard pitch scale, and peak meter.
   for (std::size_t i = 0; i < s.channels.size(); ++i) {
     const int ch = static_cast<int>(i);
+    ImGui::PushID(ch);
     const ChannelState& c = s.channels[i];
     if (c.dormant) {
       ImGui::TextDisabled("CH%02d dormant", ch);
+      ImGui::PopID();
       continue;
     }
     const StripState st = stripState(s, ch);
@@ -126,6 +128,7 @@ void MidiTab::drawChannelStrips(const DeviceSnapshot& s) {
     ImGui::Dummy(ImVec2(kBarW, kBarH));
     ImGui::SameLine();
     ImGui::ProgressBar(st.peak, ImVec2(70.0f, 0.0f));
+    ImGui::PopID();
   }
 }
 

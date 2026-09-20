@@ -163,6 +163,10 @@ class SmfReader {
     pos_ += k;
   }
   std::size_t pos() const { return pos_; }
+  void seek(std::size_t pos) {
+    pos_ = pos <= n_ ? pos : n_;
+    ok_ = (p_ != nullptr);
+  }
 
  private:
   const std::uint8_t* p_;
@@ -171,25 +175,8 @@ class SmfReader {
   bool ok_;
 };
 
-struct SmfNoteOn {
-  std::uint32_t tick = 0;
-  int channel = 0;
-  int key = 0;
-  int vel = 0;
-};
-
-struct SmfProgChange {
-  std::uint32_t tick = 0;
-  int channel = 0;
-  std::uint8_t program = 0;
-};
-
-// Parses one track's events; appends note-ons (vel > 0), note-offs
-// (0x8x or 0x9x vel 0), program changes, and tempo map entries. Returns false on damage.
-bool parseSmfTrack(SmfReader* r, std::size_t track_end,
-                   std::vector<SmfNoteOn>* ons,
-                   std::vector<SmfNoteOn>* offs,
-                   std::vector<SmfProgChange>* progs,
+// Extracts tempo events (0xFF 0x51 0x03) from a single SMF track.
+bool extractTempos(SmfReader* r, std::size_t track_end,
                    std::vector<std::pair<std::uint32_t, std::uint32_t> >* tempos) {
   std::uint32_t tick = 0;
   std::uint8_t running = 0;
@@ -198,7 +185,7 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end,
     if (!r->ok()) return false;
     std::uint8_t status = r->u8();
     if (!r->ok()) return false;
-    int data_byte = -1;  // First data byte, when running status applies.
+    int data_byte = -1;
     if (status < 0x80) {
       if (running == 0) return false;
       data_byte = status;
@@ -215,10 +202,55 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end,
         const std::uint32_t tempo =
             (static_cast<std::uint32_t>(b0) << 16) |
             (static_cast<std::uint32_t>(b1) << 8) | b2;
-        if (tempo > 0) tempos->push_back({tick, tempo});
+        if (tempo > 0 && tempos != nullptr) tempos->push_back({tick, tempo});
       } else {
         r->skip(len);
       }
+      running = 0;
+    } else if (status == 0xF0 || status == 0xF7) {
+      const std::uint32_t len = r->vlq();
+      if (!r->ok()) return false;
+      r->skip(len);
+      running = 0;
+    } else {
+      const std::uint8_t hi = status & 0xF0;
+      running = status;
+      if (hi == 0xC0 || hi == 0xD0) {
+        if (data_byte < 0) r->u8();
+      } else {
+        if (data_byte < 0) r->u8();
+        r->u8();
+      }
+    }
+  }
+  return r->ok();
+}
+
+// Parses one track's events with per-track Note-Off to Note-On matching.
+template <typename F>
+bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
+                   std::vector<SimNoteEvent>* out) {
+  std::uint32_t tick = 0;
+  std::uint8_t running = 0;
+  std::vector<std::pair<std::uint32_t, int> > pending[16][128];
+
+  while (r->pos() < track_end && r->ok()) {
+    tick += r->vlq();
+    if (!r->ok()) return false;
+    std::uint8_t status = r->u8();
+    if (!r->ok()) return false;
+    int data_byte = -1;
+    if (status < 0x80) {
+      if (running == 0) return false;
+      data_byte = status;
+      status = running;
+    }
+    if (status == 0xFF) {
+      const std::uint8_t mtype = r->u8();
+      (void)mtype;
+      const std::uint32_t len = r->vlq();
+      if (!r->ok()) return false;
+      r->skip(len);
       running = 0;
     } else if (status == 0xF0 || status == 0xF7) {
       const std::uint32_t len = r->vlq();
@@ -234,8 +266,16 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end,
                                     ? static_cast<std::uint8_t>(data_byte)
                                     : r->u8();
         if (!r->ok()) return false;
-        if (hi == 0xC0 && progs != nullptr) {
-          progs->push_back({tick, ch, d1});
+        if (hi == 0xC0 && out != nullptr) {
+          SimNoteEvent pcev;
+          pcev.frame = tickToFrame(tick);
+          pcev.channel = static_cast<std::uint8_t>(ch);
+          pcev.note = d1;
+          pcev.velocity = 0;
+          pcev.duration_frames = 0;
+          pcev.is_note_on = true;
+          pcev.type = SimEventType::ProgramChange;
+          out->push_back(pcev);
         }
       } else {
         const std::uint8_t d1 = data_byte >= 0
@@ -244,9 +284,85 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end,
         const std::uint8_t d2 = r->u8();
         if (!r->ok()) return false;
         if (hi == 0x90 && d2 > 0) {
-          ons->push_back({tick, ch, d1, d2});
+          if (ch < 16 && d1 < 128) {
+            pending[ch][d1].push_back({tick, d2});
+          }
         } else if (hi == 0x90 || hi == 0x80) {
-          offs->push_back({tick, ch, d1, 0});
+          if (ch < 16 && d1 < 128 && !pending[ch][d1].empty()) {
+            const auto on_ev = pending[ch][d1].front();
+            pending[ch][d1].erase(pending[ch][d1].begin());
+            const std::uint32_t on_frame = tickToFrame(on_ev.first);
+            std::uint32_t off_frame = tickToFrame(tick);
+            if (off_frame <= on_frame) off_frame = on_frame + 1;
+            const std::uint32_t dur = off_frame - on_frame;
+            if (out != nullptr) {
+              SimNoteEvent on;
+              on.frame = on_frame;
+              on.channel = static_cast<std::uint8_t>(ch);
+              on.note = d1;
+              on.velocity = static_cast<std::uint8_t>(on_ev.second < 1 ? 1 : (on_ev.second > 127 ? 127 : on_ev.second));
+              on.duration_frames = static_cast<std::uint16_t>(dur > 0xFFFF ? 0xFFFF : dur);
+              on.is_note_on = true;
+              on.type = SimEventType::Note;
+              out->push_back(on);
+
+              SimNoteEvent off;
+              off.frame = off_frame;
+              off.channel = static_cast<std::uint8_t>(ch);
+              off.note = d1;
+              off.velocity = 0;
+              off.duration_frames = 0;
+              off.is_note_on = false;
+              off.type = SimEventType::Note;
+              out->push_back(off);
+            }
+          }
+        } else if (hi == 0xB0) {
+          if (out != nullptr && (d1 == 7 || d1 == 10)) {
+            SimNoteEvent ccev;
+            ccev.frame = tickToFrame(tick);
+            ccev.channel = static_cast<std::uint8_t>(ch);
+            ccev.note = d1;
+            ccev.velocity = d2;
+            ccev.duration_frames = 0;
+            ccev.is_note_on = true;
+            ccev.type = SimEventType::ControlChange;
+            out->push_back(ccev);
+          }
+        }
+      }
+    }
+  }
+
+  // Close any unclosed notes in this track at the end of the track.
+  const std::uint32_t track_end_frame = tickToFrame(tick) + 1;
+  for (int c = 0; c < 16; ++c) {
+    for (int k = 0; k < 128; ++k) {
+      for (const auto& on_ev : pending[c][k]) {
+        const std::uint32_t on_frame = tickToFrame(on_ev.first);
+        const std::uint32_t off_frame =
+            track_end_frame > on_frame ? track_end_frame : on_frame + 1;
+        const std::uint32_t dur = off_frame - on_frame;
+        if (out != nullptr) {
+          SimNoteEvent on;
+          on.frame = on_frame;
+          on.channel = static_cast<std::uint8_t>(c);
+          on.note = static_cast<std::uint8_t>(k);
+          on.velocity = static_cast<std::uint8_t>(on_ev.second < 1 ? 1 : (on_ev.second > 127 ? 127 : on_ev.second));
+          on.duration_frames = static_cast<std::uint16_t>(dur > 0xFFFF ? 0xFFFF : dur);
+          on.is_note_on = true;
+          on.type = SimEventType::Note;
+          out->push_back(on);
+
+          SimNoteEvent off;
+          off.frame = off_frame;
+          off.channel = static_cast<std::uint8_t>(c);
+          off.note = static_cast<std::uint8_t>(k);
+          off.velocity = 0;
+          off.duration_frames = 0;
+          off.is_note_on = false;
+          off.type = SimEventType::Note;
+          out->push_back(off);
         }
       }
     }
@@ -555,23 +671,30 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
   r.skip(header_len > 6 ? header_len - 6 : 0);
   if (!r.ok()) return out;
 
-  std::vector<SmfNoteOn> ons, offs;
-  std::vector<SmfProgChange> progs;
-  std::vector<std::pair<std::uint32_t, std::uint32_t> > tempos;  // (tick, usec)
+  struct TrackInfo {
+    std::size_t start_pos = 0;
+    std::size_t end_pos = 0;
+  };
+  std::vector<TrackInfo> track_infos;
+  track_infos.reserve(ntracks);
+  std::vector<std::pair<std::uint32_t, std::uint32_t> > tempos;
+
   for (std::uint16_t t = 0; t < ntracks; ++t) {
     if (r.u8() != 'M' || r.u8() != 'T' || r.u8() != 'r' || r.u8() != 'k') {
       return out;
     }
     const std::uint32_t track_len = r.u32be();
     if (!r.ok()) return out;
-    const std::size_t track_end = r.pos() + track_len;
-    if (!parseSmfTrack(&r, track_end, &ons, &offs, &progs, &tempos)) return out;
+    const std::size_t track_start = r.pos();
+    const std::size_t track_end = track_start + track_len;
+    track_infos.push_back({track_start, track_end});
+    if (!extractTempos(&r, track_end, &tempos)) return out;
+    r.seek(track_end);
   }
-  if (ons.empty() && progs.empty()) return out;
 
   std::sort(tempos.begin(), tempos.end());
   auto tempoAt = [&](std::uint32_t tick) -> std::uint32_t {
-    std::uint32_t tempo = 1000000;  // Our files' fixed tempo.
+    std::uint32_t tempo = 1000000;  // Default tempo: 1s per quarter.
     for (const auto& te : tempos) {
       if (te.first <= tick) {
         tempo = te.second;
@@ -589,75 +712,12 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
     return static_cast<std::uint32_t>(frames + 0.5);
   };
 
-  // Dispatch Program Changes.
-  for (const auto& pc : progs) {
-    SimNoteEvent pcev;
-    pcev.frame = tickToFrame(pc.tick);
-    pcev.channel = static_cast<std::uint8_t>(pc.channel);
-    pcev.note = pc.program;
-    pcev.type = SimEventType::ProgramChange;
-    out.push_back(pcev);
+  // Pass 2: parse each track with per-track Note-Off to Note-On matching.
+  for (const auto& ti : track_infos) {
+    r.seek(ti.start_pos);
+    if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &out)) return out;
   }
 
-  // Match offs to ons in tick order: index offs per (channel, key).
-  std::map<std::uint32_t, std::vector<std::size_t> > off_index;
-  for (std::size_t i = 0; i < offs.size(); ++i) {
-    const std::uint32_t k =
-        (static_cast<std::uint32_t>(offs[i].channel) << 8) |
-        static_cast<std::uint32_t>(offs[i].key);
-    off_index[k].push_back(i);
-  }
-  std::map<std::uint32_t, std::size_t> off_cursor;
-  std::vector<char> off_used(offs.size(), 0);
-
-  std::uint32_t max_tick = 0;
-  for (const auto& o : ons) max_tick = std::max(max_tick, o.tick);
-  for (const auto& o : offs) max_tick = std::max(max_tick, o.tick);
-
-  for (const auto& on : ons) {
-    const std::uint32_t k = (static_cast<std::uint32_t>(on.channel) << 8) |
-                            static_cast<std::uint32_t>(on.key);
-    std::uint32_t off_tick = max_tick;  // Dangling note-on: close at end.
-    auto it = off_index.find(k);
-    if (it != off_index.end()) {
-      std::size_t& cur = off_cursor[k];
-      while (cur < it->second.size() &&
-             (off_used[it->second[cur]] != 0 ||
-              offs[it->second[cur]].tick < on.tick)) {
-        ++cur;
-      }
-      if (cur < it->second.size()) {
-        off_tick = offs[it->second[cur]].tick;
-        off_used[it->second[cur]] = 1;
-        ++cur;
-      }
-    }
-    const std::uint32_t frame = tickToFrame(on.tick);
-    std::uint32_t off_frame = tickToFrame(off_tick);
-    if (off_frame <= frame) {
-      off_frame = frame + 1;
-    }
-    SimNoteEvent ev_on;
-    ev_on.frame = frame;
-    ev_on.channel = static_cast<std::uint8_t>(on.channel);
-    ev_on.note = static_cast<std::uint8_t>(on.key);
-    int vel = on.vel < 1 ? 1 : (on.vel > 127 ? 127 : on.vel);
-    ev_on.velocity = static_cast<std::uint8_t>(vel);
-    const std::uint32_t dur =
-        off_frame > frame ? off_frame - frame : 1;
-    ev_on.duration_frames =
-        static_cast<std::uint16_t>(dur > 0xFFFF ? 0xFFFF : dur);
-    ev_on.is_note_on = true;
-    out.push_back(ev_on);
-    SimNoteEvent ev_off;
-    ev_off.frame = off_frame;
-    ev_off.channel = ev_on.channel;
-    ev_off.note = ev_on.note;
-    ev_off.velocity = 0;
-    ev_off.duration_frames = 0;
-    ev_off.is_note_on = false;
-    out.push_back(ev_off);
-  }
   std::stable_sort(out.begin(), out.end(), eventLess);
   return out;
 }

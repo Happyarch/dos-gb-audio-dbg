@@ -3,6 +3,8 @@
 
 #include "tabs/mt32_tab.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <utility>
 
@@ -125,10 +127,12 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
   // on factory hardware and gets no strip. Dormant parts take the fast
   // escape (label only, no bar work).
   for (int part = 0; part < kParts; ++part) {
+    ImGui::PushID(part);
     const PartStrip ps = partStrip(s, part);
     const std::string label = partLabel(part);
     if (ps.dormant) {
       ImGui::TextDisabled("%s dormant", label.c_str());
+      ImGui::PopID();
       continue;
     }
     // Activity LED: green when the part is active, dim otherwise.
@@ -147,11 +151,12 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
     if (muted) ImGui::PopStyleColor();
     ImGui::SameLine();
     const int prog = mt32_->program(ps.channel);
+    const char* cur_patch = mt32_->patchName(part);
     // Timbre selector combo (128 factory timbres).
     char combo_id[32];
     std::snprintf(combo_id, sizeof(combo_id), "##mt32prog%d", part);
     ImGui::SetNextItemWidth(140.0f);
-    if (ImGui::BeginCombo(combo_id, programName(prog))) {
+    if (ImGui::BeginCombo(combo_id, cur_patch)) {
       for (int p = 0; p < 128; ++p) {
         const bool selected = (p == prog);
         if (ImGui::Selectable(programName(p), selected)) {
@@ -162,16 +167,72 @@ void Mt32Tab::drawChannelStrips(const DeviceSnapshot& s) {
       ImGui::EndCombo();
     }
     ImGui::SameLine();
-    // Musical keyboard pitch scale bar showing active sounding notes.
+    // Musical keyboard pitch scale bar showing active sounding notes (MUNT-QT parity).
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     constexpr float kBarW = 240.0f;
     constexpr float kBarH = 16.0f;
-    drawPitchScale(dl, origin, ImVec2(kBarW, kBarH), mt32_, ps.channel);
+    drawPartPitchScale(dl, origin, ImVec2(kBarW, kBarH), part);
     ImGui::Dummy(ImVec2(kBarW, kBarH));
     ImGui::SameLine();
     // Peak level meter.
     ImGui::ProgressBar(ps.peak, ImVec2(70.0f, 0.0f));
+    ImGui::PopID();
+  }
+}
+
+void Mt32Tab::drawPartPitchScale(ImDrawList* dl, ImVec2 origin, ImVec2 size,
+                                 int part) {
+  if (dl == nullptr || size.x <= 0.0f || size.y <= 0.0f) return;
+
+  const ImU32 bg_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.18f, 0.18f, 0.20f, 1.0f));
+  const ImU32 border_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.28f, 0.28f, 0.30f, 1.0f));
+  const ImU32 tick_col =
+      ImGui::ColorConvertFloat4ToU32(ImVec4(0.32f, 0.32f, 0.35f, 1.0f));
+
+  dl->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), bg_col,
+                    2.0f);
+  dl->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y), border_col,
+              2.0f);
+
+  constexpr int kMinNote = 21;
+  constexpr int kMaxNote = 108;
+  constexpr int kRange = kMaxNote - kMinNote;
+
+  // Draw octave ticks for C keys (24, 36, 48, 60, 72, 84, 96, 108).
+  for (int n = 24; n <= 108; n += 12) {
+    const float x = origin.x +
+                    (static_cast<float>(n - kMinNote) /
+                     static_cast<float>(kRange)) *
+                        size.x;
+    dl->AddLine(ImVec2(x, origin.y + 1), ImVec2(x, origin.y + size.y - 1),
+                tick_col, 1.0f);
+  }
+
+  if (mt32_ == nullptr || part < 0 || part >= kParts) return;
+
+  std::uint8_t keys[32];
+  std::uint8_t vels[32];
+  const int count = mt32_->getPlayingNotes(part, keys, vels);
+  constexpr float kMarkerW = 4.0f;
+  for (int i = 0; i < count; ++i) {
+    int clamped = keys[i];
+    if (clamped < kMinNote) clamped = kMinNote;
+    if (clamped > kMaxNote) clamped = kMaxNote;
+    const float frac = static_cast<float>(clamped - kMinNote) /
+                       static_cast<float>(kRange);
+    const float mx = origin.x + frac * (size.x - kMarkerW);
+    const int vel = vels[i];
+    const float r = std::clamp(2.0f * static_cast<float>(vel) / 255.0f, 0.0f, 1.0f);
+    const float g =
+        std::clamp((255.0f - 2.0f * static_cast<float>(vel)) / 255.0f, 0.0f, 1.0f);
+    const ImU32 marker_col = ImGui::ColorConvertFloat4ToU32(
+        ImVec4(r, g, 0.0f, 0.95f));
+    dl->AddRectFilled(ImVec2(mx, origin.y + 1.0f),
+                      ImVec2(mx + kMarkerW, origin.y + size.y - 1.0f),
+                      marker_col, 1.0f);
   }
 }
 

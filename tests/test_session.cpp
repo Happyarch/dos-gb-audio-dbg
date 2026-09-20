@@ -412,7 +412,8 @@ int main() {
     std::uint32_t prev = 0;
     bool first = true;
     for (const SimNoteEvent& e : base) {
-      if (e.type == SimEventType::ProgramChange) continue;
+      if (e.type == SimEventType::ProgramChange ||
+          e.type == SimEventType::ControlChange) continue;
       if (e.is_note_on) {
         ++ons;
         CHECK(e.velocity >= 1 && e.velocity <= 127);
