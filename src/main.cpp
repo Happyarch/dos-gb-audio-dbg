@@ -492,6 +492,7 @@ int main(int argc, char** argv) {
 
     catalog.load(root, consts, headers);
     enh_mgr.setRepoRoot(root);
+    mt32_dev.setRepoRoot(root);
     enh_mgr.setEnhanceDir(enhancements);
     enh_mgr.setRevisionsDir(root.empty() ? "" : root + "/dos_port/tools/audio/.revisions");
 

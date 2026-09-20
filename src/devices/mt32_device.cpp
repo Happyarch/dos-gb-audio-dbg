@@ -186,11 +186,9 @@ bool Mt32Device::init() {
     updateTelemetry();
   }
   inited_ = true;
-  // Upload the custom Timbre Memory bank once. Every per-track setup only
-  // rewrites Patch Memory pointers into these slots, so without this the
-  // slots hold factory occupants and a Program Change lands on the wrong
-  // voice. Real ROM only; the bridge is a no-op in mock mode.
-  if (!mock_) loadCustomTimbreBank();
+  // The Timbre Memory bank is uploaded later, once the configured repo root is
+  // known (see setRepoRoot()): init() runs before the config root is resolved,
+  // and the device must not discover the repo via a CWD walk-up.
   return true;
 }
 
@@ -372,16 +370,23 @@ void Mt32Device::parseDisplaySysEx(const std::uint8_t* data,
 }
 
 void Mt32Device::loadCustomTimbreBank() {
-  if (mock_ || !synth_open_) return;
-  const std::string repo_root = sysex_bridge::findRepoRoot();
-  if (repo_root.empty()) return;
+  if (mock_ || !synth_open_ || repo_root_.empty() || timbre_bank_loaded_) return;
   std::vector<std::vector<std::uint8_t> > timbres;
   SongTimbreSysex unused;
   // The bridge imports the repository's own encoder (gen_mt32_patches); if
   // python3/the script/the repo is unavailable this is a silent no-op, which
   // is exactly the pre-existing factory-occupant behaviour.
-  if (!sysex_bridge::run(repo_root, "timbres", "", &timbres, &unused)) return;
+  if (!sysex_bridge::run(repo_root_, "timbres", "", &timbres, &unused)) return;
   sendSysExMessages(timbres);
+  timbre_bank_loaded_ = true;
+}
+
+void Mt32Device::setRepoRoot(const std::string& root) {
+  if (root != repo_root_) {
+    repo_root_ = root;
+    timbre_bank_loaded_ = false;  // re-upload if the project changed
+  }
+  loadCustomTimbreBank();
 }
 
 void Mt32Device::sendSysExMessages(

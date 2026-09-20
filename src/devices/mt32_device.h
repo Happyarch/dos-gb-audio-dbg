@@ -163,6 +163,12 @@ class Mt32Device : public MidiDevice {
   void applySongTimbres(const std::string& song,
                         const std::vector<std::vector<std::uint8_t> >& setup,
                         const std::vector<std::vector<std::uint8_t> >& cleanup);
+  // Sets the repository root and uploads the Timbre Memory bank once (the
+  // first time a non-empty root is provided while the synth is open). init()
+  // runs before the config root is resolved, so the upload is deferred here
+  // rather than in init() -- the root must come from the config, not a CWD
+  // walk-up, or a desktop/file-manager launch never uploads the bank.
+  void setRepoRoot(const std::string& root);
 
   // --- Engine queue health (thread-safe) ---
   // Number of short/SysEx messages the MUNT event queue rejected (full).
@@ -238,6 +244,10 @@ class Mt32Device : public MidiDevice {
   // (init/loadTrackBaseline); the synth sees the resulting queued SysEx.
   std::string timbre_song_;
   std::vector<std::vector<std::uint8_t> > timbre_cleanup_;
+  // Repository root for the timbre-bank upload (set from the config root, so
+  // a desktop launch works; the device must not discover it via CWD).
+  std::string repo_root_;
+  bool timbre_bank_loaded_ = false;
   // Mock voice phases, driven by the base note matrix.
   std::array<std::array<double, 128>, kChannels> phases_{};
   // Messages rejected by the full MUNT event queue (see droppedMessages()).
