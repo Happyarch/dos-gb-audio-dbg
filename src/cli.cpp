@@ -112,6 +112,16 @@ bool parseCliArgs(const std::vector<std::string>& args, CliOptions* out,
       opt.headless = true;
     } else if (a == "--track" || startsWith(a, "--track=")) {
       if (!needValue("--track", &opt.track)) return false;
+    } else if (a == "--project-dir" || a == "--project_dir" ||
+               startsWith(a, "--project-dir=") ||
+               startsWith(a, "--project_dir=")) {
+      std::string v;
+      const char* flag = startsWith(a, "--project_dir") ? "--project_dir"
+                                                        : "--project-dir";
+      if (!needValue(flag, &v)) return false;
+      opt.project_dir = v;
+    } else if (a == "--project" || startsWith(a, "--project=")) {
+      if (!needValue("--project", &opt.project)) return false;
     } else if (a == "--device" || startsWith(a, "--device=")) {
       std::string v;
       if (!needValue("--device", &v)) return false;
@@ -143,6 +153,12 @@ bool parseCliArgs(const std::vector<std::string>& args, CliOptions* out,
       if (!parseEnhancementValue(v, &opt.no_enhancement)) {
         return fail("bad --enhancement value " + v + " (want 0 or 1)");
       }
+    } else if (a == "--overrides" || startsWith(a, "--overrides=")) {
+      if (!needValue("--overrides", &opt.overrides)) return false;
+    } else if (a == "--enhancements" || startsWith(a, "--enhancements=")) {
+      if (!needValue("--enhancements", &opt.enhancements)) return false;
+    } else if (a == "--constants" || startsWith(a, "--constants=")) {
+      if (!needValue("--constants", &opt.constants)) return false;
     } else if (startsWith(a, "--")) {
       return fail("unknown flag " + a + " (see --help)");
     } else {
@@ -150,6 +166,11 @@ bool parseCliArgs(const std::vector<std::string>& args, CliOptions* out,
                   " (see --help)");
     }
   }
+  // Keep directory-style aliases in sync with the canonical fields.
+  opt.project_root = opt.project_dir;
+  opt.overrides_dir = opt.overrides;
+  opt.enhancements_dir = opt.enhancements;
+  opt.constants_path = opt.constants;
   *out = opt;
   return true;
 }
@@ -191,6 +212,15 @@ std::string cliUsage(const char* prog) {
   s += "  --enhancement 0|1    explicit form of the same switch.\n";
   s += "  --replay <log>       replay a captured .audiolog frame-by-frame on\n";
   s += "                       the selected device (implies --headless).\n";
+  s += "  --project <name>     select the active project from\n";
+  s += "                       ~/.config/dos-gb-audio-dbg/config.yaml.\n";
+  s += "  --project-dir <path> override the active project root directory.\n";
+  s += "  --overrides <path>   explicit overrides directory (wins over the\n";
+  s += "                       configured project path).\n";
+  s += "  --enhancements <p>   explicit enhancements directory (wins over\n";
+  s += "                       the configured project path).\n";
+  s += "  --constants <path>   explicit constants file (wins over the\n";
+  s += "                       configured project path).\n";
   s += "\nExamples:\n";
   s += "  " + p + " --headless --track MUSIC_PALLET_TOWN --out pal.wav\n";
   s += "  " + p + " --headless --track routes1 --device gm --frames 600\n";

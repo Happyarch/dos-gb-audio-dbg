@@ -8,6 +8,8 @@
 #include <cstdio>
 #include <vector>
 
+#include "cli.h"
+#include "config.h"
 #include "devices/gb_apu_device.h"
 #include "devices/gm_device.h"
 #include "devices/midi_device.h"
@@ -136,13 +138,31 @@ int runHeadlessTrack(const CliOptions& opt, std::string* err,
     return fail("device " + canon + " failed to initialize");
   }
 
+  ConfigManager config_mgr;
+  config_mgr.load();
+  if (!opt.project.empty()) {
+    config_mgr.setCurrentProject(opt.project);
+  }
+  if (!opt.project_dir.empty()) {
+    config_mgr.setActiveProjectRoot(opt.project_dir);
+  }
+  const std::string root = config_mgr.activeRoot();
+  const std::string consts = config_mgr.resolveConstantsPath(opt.constants_path);
+  const std::string headers = config_mgr.resolveHeadersDir();
+  const std::string overrides = config_mgr.resolveOverridesDir(opt.overrides_dir);
+  const std::string enhancements = config_mgr.resolveEnhancementsDir(opt.enhancements_dir);
+
   SongCatalog catalog;
+  catalog.load(root, consts, headers);
   const SongInfo* info = catalog.findTrack(opt.track);
   if (info == nullptr) {
     dev->shutdown();
     return fail("unknown track " + opt.track);
   }
   EnhancementManager enh_mgr;
+  enh_mgr.setRepoRoot(root);
+  enh_mgr.setEnhanceDir(enhancements);
+  enh_mgr.setRevisionsDir(root.empty() ? "" : root + "/dos_port/tools/audio/.revisions");
   const std::string target = deviceMidiTarget(canon);
   std::vector<SimNoteEvent> base =
       enh_mgr.loadSongBaseline(info->header_label, target);

@@ -44,6 +44,7 @@
 // Stage 8: headless CLI batch renderer + .audiolog replayer.
 #include "audio_mixer.h"
 #include "cli.h"
+#include "config.h"
 #include "enhancement_manager.h"
 #include "headless.h"
 #include "session_engine.h"
@@ -58,7 +59,7 @@
 
 namespace {
 
-constexpr char kWindowTitle[] = "Pokémon Yellow Audio Debugger (pkmn-audio-dbg)";
+constexpr char kWindowTitle[] = "DOS GB Audio Debugger (dgad)";
 constexpr int kWindowWidth = 1280;
 constexpr int kWindowHeight = 720;
 // 60 Hz frame pacing: ~16.6 ms per frame.
@@ -327,24 +328,77 @@ int main(int argc, char** argv) {
   engine.setActiveDevice(devices[device_tab]);
   mixer.setDevice(devices[device_tab], device_rates[device_tab]);
 
-  // --- Track catalog & UI state --------------------------------------------
-  std::vector<std::string> track_names;
-  if (!catalog.empty()) {
-    for (const auto& t : catalog.tracks()) {
-      track_names.push_back(t.constant_name);
-    }
-  } else {
-    track_names.push_back("MUSIC_PALLET_TOWN");
+  // --- Multi-project configuration & track catalog -------------------------
+  audio_dbg::ConfigManager config_mgr;
+  config_mgr.load();
+  if (!cli_opt.project.empty()) {
+    config_mgr.setCurrentProject(cli_opt.project);
+  }
+  if (!cli_opt.project_dir.empty()) {
+    config_mgr.setActiveProjectRoot(cli_opt.project_dir);
   }
 
+  std::vector<std::string> track_names;
   int track_index = 0;
-  for (std::size_t i = 0; i < track_names.size(); ++i) {
-    if (track_names[i] == "MUSIC_PALLET_TOWN") {
-      track_index = static_cast<int>(i);
-      break;
+
+  auto reloadActiveProject = [&](const std::string& proj_name) {
+    if (!proj_name.empty()) {
+      config_mgr.setCurrentProject(proj_name);
     }
-  }
+    const std::string root = config_mgr.activeRoot();
+    const std::string consts = config_mgr.resolveConstantsPath(cli_opt.constants_path);
+    const std::string headers = config_mgr.resolveHeadersDir();
+    const std::string overrides = config_mgr.resolveOverridesDir(cli_opt.overrides_dir);
+    const std::string enhancements = config_mgr.resolveEnhancementsDir(cli_opt.enhancements_dir);
+
+    catalog.load(root, consts, headers);
+    enh_mgr.setRepoRoot(root);
+    enh_mgr.setEnhanceDir(enhancements);
+    enh_mgr.setRevisionsDir(root.empty() ? "" : root + "/dos_port/tools/audio/.revisions");
+
+    track_names.clear();
+    if (!catalog.empty()) {
+      for (const auto& t : catalog.tracks()) {
+        track_names.push_back(t.constant_name);
+      }
+    } else {
+      track_names.push_back("MUSIC_PALLET_TOWN");
+    }
+    track_index = 0;
+    for (std::size_t i = 0; i < track_names.size(); ++i) {
+      if (track_names[i] == "MUSIC_PALLET_TOWN") {
+        track_index = static_cast<int>(i);
+        break;
+      }
+    }
+    last_loaded_track = -1;  // Force reload of baseline
+  };
+
+  reloadActiveProject(config_mgr.currentProjectName());
+
+  std::map<std::string, audio_dbg::SongCatalog> other_catalogs;
+  auto getProjectCatalog = [&](const std::string& proj_name) -> audio_dbg::SongCatalog& {
+    auto it = other_catalogs.find(proj_name);
+    if (it != other_catalogs.end()) {
+      return it->second;
+    }
+    const audio_dbg::ProjectConfig* cfg = config_mgr.project(proj_name);
+    audio_dbg::SongCatalog cat;
+    if (cfg != nullptr && !cfg->root.empty()) {
+      std::string c_path = cfg->constants.empty() ? "" :
+          (cfg->constants.front() == '/' ? cfg->constants : cfg->root + "/" + cfg->constants);
+      std::string h_dir = cfg->headers.empty() ? "" :
+          (cfg->headers.front() == '/' ? cfg->headers : cfg->root + "/" + cfg->headers);
+      cat.load(cfg->root, c_path, h_dir);
+    }
+    auto res = other_catalogs.emplace(proj_name, std::move(cat));
+    return res.first->second;
+  };
+
   bool enhance_gb = true;
+  char search_buf[128] = "";
+  bool cross_project_search = false;
+  bool focus_search_input = false;
 
   // --- Main loop, 60 Hz paced -----------------------------------------------
   bool running = true;
@@ -359,8 +413,13 @@ int main(int argc, char** argv) {
       } else if (event.type == SDL_KEYDOWN && event.key.repeat == 0) {
         if (event.key.keysym.sym == SDLK_ESCAPE) {
           running = false;
-        } else {
-          // Stage 6.4: transport shortcuts handled exactly once, here.
+        } else if ((event.key.keysym.mod & KMOD_CTRL) && (event.key.keysym.sym == SDLK_f)) {
+          focus_search_input = true;
+        } else if (!(event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) &&
+                   event.key.keysym.sym == SDLK_SLASH && !io.WantTextInput) {
+          focus_search_input = true;
+        } else if (!io.WantTextInput) {
+          // Stage 6.4: transport shortcuts handled only when text input is not active
           audio_dbg::TransportKey tkey;
           if (sdlToTransportKey(event.key.keysym.sym, &tkey)) {
             mixer.lock();
@@ -404,23 +463,166 @@ int main(int argc, char** argv) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 
-    // Top bar: track selector + enhancement toggles.
+    // Top bar: project switcher, track search bar, track selector + enhancement toggles.
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, 56));
     ImGui::Begin("Top Bar", nullptr,
-                 ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoMove);
-    auto trackGetter = [](void* data, int idx, const char** out_text) -> bool {
-      const auto* names = reinterpret_cast<const std::vector<std::string>*>(data);
-      if (names == nullptr || idx < 0 ||
-          idx >= static_cast<int>(names->size())) {
-        return false;
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+
+    // 1. Project Switcher combo
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Project:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(130.0f);
+    std::string current_proj = config_mgr.currentProjectName();
+    if (ImGui::BeginCombo("##ProjectSelect", current_proj.c_str())) {
+      for (const auto& p : config_mgr.projects()) {
+        const bool is_selected = (p == current_proj);
+        if (ImGui::Selectable(p.c_str(), is_selected)) {
+          if (p != current_proj) {
+            mixer.lock();
+            reloadActiveProject(p);
+            mixer.unlock();
+          }
+        }
+        if (is_selected) {
+          ImGui::SetItemDefaultFocus();
+        }
       }
-      *out_text = (*names)[static_cast<std::size_t>(idx)].c_str();
-      return true;
+      ImGui::EndCombo();
+    }
+
+    // 2. Track Search Bar with shortcut (/ or Ctrl+F)
+    ImGui::SameLine();
+    ImGui::Text("Search:");
+    ImGui::SameLine();
+    if (focus_search_input) {
+      ImGui::SetKeyboardFocusHere();
+      focus_search_input = false;
+    }
+    ImGui::SetNextItemWidth(150.0f);
+    const bool search_submitted = ImGui::InputTextWithHint(
+        "##TrackSearch", "/ or Ctrl+F...", search_buf, sizeof(search_buf),
+        ImGuiInputTextFlags_EnterReturnsTrue);
+
+    // 3. Search Scope Toggle Button
+    ImGui::SameLine();
+    const char* scope_label = cross_project_search ? "[Scope: All]" : "[Scope: Project]";
+    if (ImGui::Button(scope_label)) {
+      cross_project_search = !cross_project_search;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("Toggle track search scope:\n- Project: search within '%s'\n- All: search across all configured projects",
+                        current_proj.c_str());
+    }
+
+    // 4. Track Selection Combo (filtered by search)
+    ImGui::SameLine();
+    ImGui::Text("Track:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(260.0f);
+
+    struct TrackOption {
+      std::string project;
+      std::string track;
+      int track_index_in_project;
     };
-    ImGui::Combo("Track", &track_index, trackGetter,
-                 const_cast<void*>(
-                     reinterpret_cast<const void*>(&track_names)),
-                 static_cast<int>(track_names.size()));
+    std::vector<TrackOption> options;
+
+    if (!cross_project_search) {
+      const std::vector<int> matched_indices = catalog.searchTracks(search_buf);
+      options.reserve(matched_indices.size());
+      for (int idx : matched_indices) {
+        if (idx >= 0 && idx < static_cast<int>(track_names.size())) {
+          options.push_back({current_proj, track_names[idx], idx});
+        }
+      }
+    } else {
+      for (const auto& p : config_mgr.projects()) {
+        if (p == current_proj) {
+          const std::vector<int> matched_indices = catalog.searchTracks(search_buf);
+          for (int idx : matched_indices) {
+            if (idx >= 0 && idx < static_cast<int>(track_names.size())) {
+              options.push_back({p, track_names[idx], idx});
+            }
+          }
+        } else {
+          auto& cat = getProjectCatalog(p);
+          const std::vector<int> matched_indices = cat.searchTracks(search_buf);
+          for (int idx : matched_indices) {
+            if (idx >= 0 && idx < static_cast<int>(cat.tracks().size())) {
+              options.push_back({p, cat.tracks()[idx].constant_name, idx});
+            }
+          }
+        }
+      }
+    }
+
+    // Handle Enter pressed in search bar: pick first match
+    if (search_submitted && !options.empty()) {
+      const auto& opt = options[0];
+      if (opt.project != current_proj) {
+        mixer.lock();
+        reloadActiveProject(opt.project);
+        mixer.unlock();
+      }
+      for (std::size_t i = 0; i < track_names.size(); ++i) {
+        if (track_names[i] == opt.track) {
+          track_index = static_cast<int>(i);
+          break;
+        }
+      }
+    }
+
+    std::string preview_text;
+    if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
+      preview_text = track_names[track_index];
+    } else {
+      preview_text = "(No Track Selected)";
+    }
+    if (search_buf[0] != '\0') {
+      preview_text += " (" + std::to_string(options.size()) + " matches)";
+    }
+
+    if (ImGui::BeginCombo("##TrackCombo", preview_text.c_str())) {
+      if (options.empty()) {
+        ImGui::Selectable("No matching tracks found", false, ImGuiSelectableFlags_Disabled);
+      } else {
+        for (const auto& opt : options) {
+          std::string label;
+          if (cross_project_search) {
+            label = "[" + opt.project + "] " + opt.track;
+          } else {
+            label = opt.track;
+          }
+          const bool is_sel = (opt.project == current_proj &&
+                               track_index >= 0 &&
+                               track_index < static_cast<int>(track_names.size()) &&
+                               opt.track == track_names[track_index]);
+          if (ImGui::Selectable(label.c_str(), is_sel)) {
+            if (opt.project != current_proj) {
+              mixer.lock();
+              reloadActiveProject(opt.project);
+              mixer.unlock();
+            }
+            for (std::size_t i = 0; i < track_names.size(); ++i) {
+              if (track_names[i] == opt.track) {
+                track_index = static_cast<int>(i);
+                break;
+              }
+            }
+          }
+          if (is_sel) {
+            ImGui::SetItemDefaultFocus();
+          }
+        }
+      }
+      ImGui::EndCombo();
+    }
+
+    // 5. Enhancement Toggles
     ImGui::SameLine();
     {
       // Stage 6.3: the checkbox mirrors the engine overlay flag, so the
@@ -450,7 +652,11 @@ int main(int argc, char** argv) {
     // Device tab bar: one tab per sound device. Selecting a tab routes
     // both the engine event stream and the mixer PCM pull to that device
     // (position-locked: the frame counter is untouched by the switch).
-    ImGui::Begin("Devices", nullptr, ImGuiWindowFlags_NoCollapse);
+    ImGui::SetNextWindowPos(ImVec2(viewport->Pos.x, viewport->Pos.y + 56));
+    ImGui::SetNextWindowSize(ImVec2(viewport->Size.x, viewport->Size.y - 56 - 104));
+    ImGui::Begin("Devices", nullptr,
+                 ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
     if (ImGui::BeginTabBar("DeviceTabBar")) {
       for (int i = 0; i < 4; ++i) {
         ImGuiTabItemFlags flags = 0;

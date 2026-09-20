@@ -11,6 +11,11 @@
 //   --no-enh           disable the enhancement layer (GB baseline only).
 //   --enhancement 0|1  same switch in explicit form (0/off/false/no disable).
 //   --replay <log>     replay a captured .audiolog (implies --headless).
+//   --project <name>   select the active project from the config file.
+//   --project-dir <p>  override the active project root directory.
+//   --overrides <path> explicit overrides directory (wins over config).
+//   --enhancements <p> explicit enhancements directory (wins over config).
+//   --constants <path> explicit constants file (wins over config).
 //
 // Pure parsing (no SDL, no audio hardware) so tests link it headless.
 // See docs/current_plan_debug_frontend.md §8 (8.1/8.2).
@@ -38,6 +43,18 @@ struct CliOptions {
   std::string replay_path;
   // True = GB baseline only (enhancement overlay off).
   bool no_enhancement = false;
+  // Multi-project configuration (config engine). Empty = use config file.
+  std::string project;        // --project <name>
+  std::string project_dir;    // --project-dir <path>
+  std::string overrides;      // --overrides <path>
+  std::string enhancements;   // --enhancements <path>
+  std::string constants;      // --constants <path>
+  // Directory-style aliases, kept in sync by parseCliArgs for callers
+  // that prefer explicit suffixes.
+  std::string project_root;      // alias of project_dir
+  std::string overrides_dir;     // alias of overrides
+  std::string enhancements_dir;  // alias of enhancements
+  std::string constants_path;    // alias of constants
 };
 
 // Parses argv (argv[0] = program name, skipped). Returns true on success;

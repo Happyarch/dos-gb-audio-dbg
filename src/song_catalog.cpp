@@ -157,17 +157,64 @@ void SongCatalog::load() {
     repo_root_.clear();
     return;
   }
-  parseConstants((fs::path(repo_root_) / kConstantsFile).string());
+  parseConstants((fs::path(repo_root_) / kConstantsFile).string(), "");
 }
 
-void SongCatalog::parseConstants(const std::string& path) {
+bool SongCatalog::load(const std::string& repo_root,
+                       const std::string& constants_path,
+                       const std::string& headers_dir) {
+  tracks_.clear();
+  repo_root_ = repo_root;
+  const std::string cpath =
+      !constants_path.empty()
+          ? constants_path
+          : (!repo_root.empty()
+                 ? (fs::path(repo_root) / kConstantsFile).string()
+                 : "");
+  if (cpath.empty()) return false;
+  std::error_code ec;
+  if (!fs::is_regular_file(fs::path(cpath), ec)) {
+    return false;
+  }
+  parseConstants(cpath, headers_dir);
+  return !tracks_.empty();
+}
+
+std::vector<int> SongCatalog::searchTracks(const std::string& query) const {
+  std::vector<int> results;
+  if (tracks_.empty()) return results;
+  const std::string q = normalize(query);
+  if (q.empty()) {
+    results.resize(tracks_.size());
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+      results[i] = static_cast<int>(i);
+    }
+    return results;
+  }
+  for (std::size_t i = 0; i < tracks_.size(); ++i) {
+    const auto& t = tracks_[i];
+    const std::string norm_c = normalize(t.constant_name);
+    const std::string norm_h = normalize(t.header_label);
+    if (norm_c.find(q) != std::string::npos ||
+        norm_h.find(q) != std::string::npos) {
+      results.push_back(static_cast<int>(i));
+    }
+  }
+  return results;
+}
+
+void SongCatalog::parseConstants(const std::string& path,
+                                const std::string& header_dir_override) {
   // Build the header table first (bank + channel metadata by label) by
   // scanning every audio/headers/*.asm file. Bank = trailing digit before
   // ".asm" (musicheadersN / sfxheadersN map to AUDIO_1..AUDIO_4); a header
   // file without one keeps bank 0.
   std::map<std::string, HeaderInfo> headers;
   std::error_code ec;
-  const fs::path header_dir = fs::path(repo_root_) / "audio" / "headers";
+  const fs::path header_dir =
+      !header_dir_override.empty()
+          ? fs::path(header_dir_override)
+          : (fs::path(repo_root_) / "audio" / "headers");
   fs::directory_iterator it(header_dir, ec);
   const fs::directory_iterator end;
   std::vector<std::string> files;

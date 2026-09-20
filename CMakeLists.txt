@@ -222,8 +222,10 @@ set(PKMN_AUDIO_DBG_TRANSPORT_SOURCES
 # Stage 8.1/8.2: Headless CLI batch renderer + .audiolog replayer
 # (arg parsing + device-native-rate WAV pipeline, no SDL/GL/ImGui).
 # See docs/current_plan_debug_frontend.md §8.
+# Plus the multi-project configuration + path hierarchy engine (config.h).
 set(PKMN_AUDIO_DBG_CLI_SOURCES
   src/cli.cpp
+  src/config.cpp
   src/headless.cpp
 )
 
@@ -520,6 +522,7 @@ add_test(NAME synth_tabs COMMAND pkmn-audio-dbg-synth-tab-tests)
 add_executable(pkmn-audio-dbg-cli-tests
   tests/test_cli.cpp
   src/cli.cpp
+  src/config.cpp
   src/headless.cpp
   src/song_catalog.cpp
   src/session_engine.cpp
@@ -555,6 +558,26 @@ target_compile_definitions(pkmn-audio-dbg-cli-tests PRIVATE
 target_compile_options(pkmn-audio-dbg-cli-tests PRIVATE -Wall -Wextra)
 
 add_test(NAME cli_verification COMMAND pkmn-audio-dbg-cli-tests)
+
+# --- Config engine: Acceptance test -------------------------------------------
+# Headless checks for the multi-project configuration + path hierarchy:
+# default creation, save/load round-trip, multi-project resolution
+# (relative join, absolute passthru, root override), CLI explicit override
+# priority, PKMN_REPO_ROOT/CWD fallback, and --project/--project-dir/
+# --overrides/--enhancements/--constants parsing. No GUI, no hardware.
+
+add_executable(pkmn-audio-dbg-config-tests
+  tests/test_config.cpp
+  src/cli.cpp
+  src/config.cpp
+)
+target_include_directories(pkmn-audio-dbg-config-tests PRIVATE
+  src
+  ${IMGUI_DIR}
+)
+target_compile_options(pkmn-audio-dbg-config-tests PRIVATE -Wall -Wextra)
+
+add_test(NAME config_engine COMMAND pkmn-audio-dbg-config-tests)
 
 # Compatibility alias
 add_executable(pkmn-audio-dbg ALIAS dos-gb-audio-dbg)

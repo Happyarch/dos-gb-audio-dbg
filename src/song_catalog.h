@@ -55,12 +55,21 @@ class SongCatalog {
   // The returned pointer stays valid for the catalog's lifetime.
   const SongInfo* findTrack(const std::string& query) const;
 
+  // Reloads catalog from explicit paths.
+  bool load(const std::string& repo_root,
+            const std::string& constants_path = "",
+            const std::string& headers_dir = "");
+
+  // Incremental search matching query against constant names and header labels.
+  // Returns matching indices in tracks(). Empty query returns all indices.
+  std::vector<int> searchTracks(const std::string& query) const;
+
   // Normalization helper (lowercase, alnum-only). Public for tests.
   static std::string normalize(const std::string& s);
 
  private:
   void load();
-  void parseConstants(const std::string& path);
+  void parseConstants(const std::string& path, const std::string& header_dir_override = "");
 
   std::string repo_root_;
   std::vector<SongInfo> tracks_;
