@@ -10,7 +10,9 @@
 // oscilloscopes trace interactively.
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -141,6 +143,121 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   engine.setEnhancementEvents(std::move(enh));
 }
 
+// --- Audio-clock tick shim (transport clock rework) -------------------------
+// The session engine's 60 Hz ticks are driven by the AUDIO callback, not by
+// the UI frame loop. `AudioMixer`'s device pointer is this thin forwarder:
+// render() splits each callback request into chunks bounded by the next tick
+// deadline, renders each chunk through the real device, and dispatches the
+// due tick(s) between chunks. Every tick therefore has a non-zero audio
+// render interval around it -- the condition that stops MUNT silently
+// dropping a zero-delta NoteOn+NoteOff -- and the tempo is a function of
+// rendered samples alone: one tick per (device_rate / 60) samples at 1.0x,
+// divided by the transport speed multiplier. The UI no longer owns the clock.
+//
+// SDL_GetQueuedAudioSize is unusable here: AudioMixer opens a CALLBACK
+// device, not an SDL_QueueAudio device, so the queued-byte accounting is
+// always 0. Counting at the device render boundary IS "audio-callback
+// rendered-sample accounting" and needs no AudioMixer edit.
+class AudioClockShim : public audio_dbg::SoundDevice {
+ public:
+  AudioClockShim() : SoundDevice(-1, "transport-clock", 0) {}
+
+  void setEngine(audio_dbg::SessionEngine* engine) { engine_ = engine; }
+  // Swaps the wrapped device + its native render rate (mixer lock held).
+  void setInner(audio_dbg::SoundDevice* dev, int rate) {
+    inner_ = dev;
+    clock_.setSampleRate(rate);
+  }
+  void setSpeed(double speed) { clock_.setSpeed(speed); }
+
+  // Instrumentation (DGAD_CLOCK_LOG=1) proving ticks are paced by renders:
+  // a single render-sized advance() must never dispatch more than one tick,
+  // and a burst flag records any >1 step (the zero-render burst defect).
+  std::uint64_t ticksTotal() const { return ticks_total_; }
+  std::uint64_t renderChunks() const { return chunks_total_; }
+  int maxTicksPerChunk() const { return max_ticks_chunk_; }
+  bool sawZeroRenderBurst() const { return zero_render_burst_; }
+  std::uint64_t renderedSamples() const { return clock_.renderedSamples(); }
+  void resetStats() {
+    ticks_total_ = 0;
+    chunks_total_ = 0;
+    max_ticks_chunk_ = 0;
+    zero_render_burst_ = false;
+  }
+
+  // --- SoundDevice forwarding (the mixer renders through this shim) --------
+  bool init() override { return inner_ != nullptr ? inner_->init() : true; }
+  void shutdown() override {
+    if (inner_ != nullptr) inner_->shutdown();
+  }
+  void reset() override {
+    if (inner_ != nullptr) inner_->reset();
+  }
+
+  void render(float* buf, std::size_t frames) override {
+    std::size_t done = 0;
+    while (done < frames) {
+      // Dispatch a deadline already reached before rendering; the previous
+      // iteration rendered for it, so this is still render-interleaved.
+      pump(0);
+      std::size_t chunk = frames - done;
+      const std::size_t until = clock_.samplesUntilNextTick();
+      if (chunk > until) chunk = until;
+      if (chunk == 0) chunk = frames - done;  // Defensive: never stall.
+      if (inner_ != nullptr) {
+        inner_->render(buf + done, chunk);
+      } else {
+        std::fill(buf + done, buf + done + chunk, 0.0f);
+      }
+      done += chunk;
+      pump(chunk);
+    }
+    pump(0);
+  }
+
+  void renderPerChannel(float** bufs, std::size_t frames) override {
+    // Stems/scope path (not the live mixer callback): forward only. The
+    // master render() above is what clocks the transport.
+    if (inner_ != nullptr) inner_->renderPerChannel(bufs, frames);
+  }
+  void setMute(int ch, bool muted) override {
+    if (inner_ != nullptr) inner_->setMute(ch, muted);
+  }
+  void setSolo(int ch, bool soloed) override {
+    if (inner_ != nullptr) inner_->setSolo(ch, soloed);
+  }
+  void tick(std::uint32_t frame) override {
+    if (inner_ != nullptr) inner_->tick(frame);
+  }
+  void handleCommand(std::uint8_t opcode, const std::uint8_t* payload,
+                     std::size_t len) override {
+    if (inner_ != nullptr) inner_->handleCommand(opcode, payload, len);
+  }
+  audio_dbg::DeviceSnapshot snapshot() const override {
+    return inner_ != nullptr ? inner_->snapshot() : audio_dbg::DeviceSnapshot();
+  }
+
+ private:
+  void pump(std::size_t frames) {
+    if (engine_ == nullptr) return;
+    const int n = clock_.advance(*engine_, frames);
+    ticks_total_ += static_cast<std::uint64_t>(n);
+    if (frames > 0) {
+      ++chunks_total_;
+      if (n > max_ticks_chunk_) max_ticks_chunk_ = n;
+      if (n > 1) zero_render_burst_ = true;
+    }
+  }
+
+  audio_dbg::SoundDevice* inner_ = nullptr;
+  audio_dbg::SessionEngine* engine_ = nullptr;
+  audio_dbg::AudioTickClock clock_;
+  std::uint64_t ticks_total_ = 0;
+  std::uint64_t chunks_total_ = 0;
+  int max_ticks_chunk_ = 0;
+  bool zero_render_burst_ = false;
+};
+
 // Stage 6.4: SDL key -> transport shortcut. Repeat events are excluded by
 // the caller (holding Space must not strobe play/pause).
 bool sdlToTransportKey(SDL_Keycode sym, audio_dbg::TransportKey* out) {
@@ -265,6 +382,7 @@ int main(int argc, char** argv) {
   // frames, loop range, slots and the enhancement overlay.
   audio_dbg::SessionEngine engine;
   audio_dbg::TransportBar transport;
+  AudioClockShim clock_shim;  // Audio-clock tick source for the transport.
   audio_dbg::SongCatalog catalog;
   audio_dbg::EnhancementManager enh_mgr;
   int last_loaded_track = -1;
@@ -320,7 +438,11 @@ int main(int argc, char** argv) {
   int device_tab = initial_tab;
   int request_tab_switch = initial_tab;
   engine.setActiveDevice(devices[device_tab]);
-  mixer.setDevice(devices[device_tab], device_rates[device_tab]);
+  // The engine dispatches to the real device; the mixer renders through the
+  // shim, whose render() is the audio clock the ticks are paced from.
+  clock_shim.setEngine(&engine);
+  clock_shim.setInner(devices[device_tab], device_rates[device_tab]);
+  mixer.setDevice(&clock_shim, device_rates[device_tab]);
 
   // --- Multi-project configuration & track catalog -------------------------
   audio_dbg::ConfigManager config_mgr;
@@ -395,6 +517,11 @@ int main(int argc, char** argv) {
   bool focus_search_input = false;
 
   // --- Main loop, 60 Hz paced -----------------------------------------------
+  // Optional transport-clock instrumentation (DGAD_CLOCK_LOG=1) proves the
+  // audio clock never dispatches a back-to-back zero-render tick burst:
+  // max_ticks_per_chunk must stay 1 and zero_render_burst must stay "no".
+  const bool clock_log = std::getenv("DGAD_CLOCK_LOG") != nullptr;
+  int clock_log_frames = 0;
   bool running = true;
   while (running) {
     const Uint32 frame_start = SDL_GetTicks();
@@ -429,9 +556,12 @@ int main(int argc, char** argv) {
       }
     }
 
-    // Stage 5.3 + 6.3: hot-reload the enhancement overlay when the watched
-    // YAML changes; Stage 6.3: speed-scaled engine advance for this UI frame.
-    // Audio device is locked while advancing engine state or feeding scopes.
+    // Stage 5.3: hot-reload the enhancement overlay when the watched YAML
+    // changes. The 60 Hz engine ticks are NOT advanced from here any more:
+    // AudioClockShim::render() paces them off the audio callback's
+    // rendered-sample count (see its comment), so the UI frame rate no longer
+    // owns the clock. Only with no audio device to clock against (mixer
+    // disabled) do we fall back to the UI-frame pacer.
     mixer.lock();
     if (enh_mgr.pollForChanges()) {
       const std::string song = enh_mgr.watchedSong();
@@ -446,9 +576,26 @@ int main(int argc, char** argv) {
         }
       }
     }
-    transport.advance(engine);
+    if (mixer.isDisabled()) {
+      transport.advance(engine);  // No audio clock: UI-frame fallback.
+    } else {
+      clock_shim.setSpeed(transport.speed());
+    }
 
     mixer.unlock();
+
+    if (clock_log && ++clock_log_frames >= 120) {
+      std::fprintf(stderr,
+                   "[clock] ticks=%llu render_chunks=%llu "
+                   "max_ticks_per_chunk=%d zero_render_burst=%s rendered=%llu\n",
+                   static_cast<unsigned long long>(clock_shim.ticksTotal()),
+                   static_cast<unsigned long long>(clock_shim.renderChunks()),
+                   clock_shim.maxTicksPerChunk(),
+                   clock_shim.sawZeroRenderBurst() ? "YES" : "no",
+                   static_cast<unsigned long long>(clock_shim.renderedSamples()));
+      clock_shim.resetStats();
+      clock_log_frames = 0;
+    }
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui_ImplSDL2_NewFrame();
@@ -661,7 +808,8 @@ int main(int argc, char** argv) {
             mixer.lock();
             device_tab = i;
             engine.setActiveDevice(devices[i]);
-            mixer.setDevice(devices[i], device_rates[i]);
+            clock_shim.setInner(devices[i], device_rates[i]);
+            mixer.setDevice(&clock_shim, device_rates[i]);
             const char* target = (device_tab == 3) ? "gm" : "mt32";
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
@@ -674,7 +822,12 @@ int main(int argc, char** argv) {
           const audio_dbg::DeviceSnapshot snap = devices[i]->snapshot();
           tabs[i]->drawChannelStrips(snap);
           tabs[i]->drawDetail(snap);
-          const audio_dbg::SimState sim = buildSimState(engine);
+          // Ticks now run on the audio callback thread; snapshot the engine
+          // frame under the same lock to avoid a torn read.
+          audio_dbg::SimState sim;
+          mixer.lock();
+          sim = buildSimState(engine);
+          mixer.unlock();
           tabs[i]->drawTracker(snap, &sim);
           tracker.draw(&sim, snap, devices[i]->channelCount());
           ImGui::EndTabItem();

@@ -259,4 +259,57 @@ void SessionEngine::syncDeviceState() {
   }
 }
 
+// --- AudioTickClock (transport rework) --------------------------------------
+
+void AudioTickClock::setSampleRate(int rate) {
+  if (rate <= 0) rate = 48000;
+  sample_rate_ = rate;
+  samples_per_tick_ = static_cast<double>(rate) / 60.0;
+  // Re-anchor: an old (longer) deadline from a different rate must not stall
+  // the new one.
+  const double now = static_cast<double>(rendered_);
+  if (next_tick_at_ > now + step()) next_tick_at_ = now + step();
+}
+
+void AudioTickClock::setSpeed(double speed) {
+  if (!(speed > 0.0)) speed = 1.0;
+  if (speed == speed_) return;
+  speed_ = speed;
+  // Re-anchor so a speed change is heard immediately instead of waiting out
+  // a deadline set under the previous (possibly much slower) speed.
+  const double now = static_cast<double>(rendered_);
+  if (next_tick_at_ > now + step()) next_tick_at_ = now + step();
+}
+
+int AudioTickClock::advance(SessionEngine& engine, std::size_t frames) {
+  rendered_ += frames;
+  const double now = static_cast<double>(rendered_);
+  const bool advancing =
+      engine.isPlaying() && !engine.isPaused() && !engine.isStopped();
+  if (!advancing) {
+    // No tick debt while paused/stopped: drag the deadline with the clock.
+    if (next_tick_at_ < now) next_tick_at_ = now;
+    return 0;
+  }
+  const double s = step();
+  // Drop any accrued debt (resume, speed change, a stalled caller) rather
+  // than dispatching a catch-up burst with no render between ticks.
+  if (now > next_tick_at_ + s) next_tick_at_ = now;
+  int done = 0;
+  while (now >= next_tick_at_) {
+    engine.tick();
+    next_tick_at_ += s;
+    ++done;
+    if (done >= 8) break;  // Defensive: never burst unboundedly.
+  }
+  return done;
+}
+
+std::size_t AudioTickClock::samplesUntilNextTick() const {
+  const double d = next_tick_at_ - static_cast<double>(rendered_);
+  if (d <= 0.0) return kNoDeadline;
+  if (d < 1.0) return 1;
+  return static_cast<std::size_t>(d);
+}
+
 }  // namespace audio_dbg

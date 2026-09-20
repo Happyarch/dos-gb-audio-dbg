@@ -2,16 +2,27 @@
 // markers, speed multipliers, enhancement/slot toggles, keyboard shortcuts.
 //
 // `TransportBar` owns the transport UI state the `SessionEngine` deliberately
-// does NOT own: the playback-speed multiplier (+ fractional accumulator) and
-// the loop toggle stash + revision-step cursor. Frame/loop/slot/enhancement
+// does NOT own: the playback-speed multiplier, the loop-toggle stash and the
+// revision-step cursor. Frame/loop/slot/enhancement
 // state itself lives in the engine; this class edits it through the engine's
 // public API so the frame counter, event stream and device silencing stay in
 // one place (position-locked A/B switching, Stage 5.4).
 //
+// Clock ownership: the LIVE audio path no longer advances the engine from the
+// UI loop. `AudioTickClock` (session_engine.h) paces 60 Hz ticks off the
+// audio callback's rendered-sample count, and the speed multiplier is a
+// sample divisor on that clock, so the song tempo is invariant to display
+// refresh/vsync and to the UI frame rate. `advance()` below is retained as
+// (a) the no-audio-device fallback used when the mixer runs disabled and
+// (b) the pure, GUI-free pacing seam the headless tests drive.
+//
 // Headless design: every behaviour below EXCEPT render() is pure C++ with no
 // ImGui/SDL dependency, so tests/test_transport.cpp drives the full logic
 // (formatting, clamping, speed pacing, loop wrap, shortcuts) without a GUI.
-// render() is the thin ImGui skin over the same methods.
+// render() is the thin ImGui skin over the same methods. Every transport-bar
+// widget carries a UNIQUE ImGui ID suffix (##tb_play, ##tb_stop, ...,
+// ##loop_clear) — sharing one suffix made ImGui report "N visible items with
+// conflicting ID" and made every item but the first unclickable.
 //
 // See docs/current_plan_debug_frontend.md §6 (6.1-6.4).
 
@@ -71,6 +82,11 @@ class TransportBar {
   // 0.25x/0.5x, bursts 2/4 ticks at 2.0x/4.0x). Returns the tick() calls
   // made. No-op (returns 0, accumulates nothing) while the engine is not
   // advancing, so pausing accrues no debt that would burst on resume.
+  //
+  // FALLBACK / TEST SEAM ONLY. The live audio path paces ticks off
+  // AudioTickClock's rendered-sample count instead (see the class comment);
+  // this method is used when the mixer has no audio device to clock against,
+  // and by the headless tests.
   int advance(SessionEngine& engine);
   void resetAccumulator() { accumulator_ = 0.0; }
   double accumulator() const { return accumulator_; }

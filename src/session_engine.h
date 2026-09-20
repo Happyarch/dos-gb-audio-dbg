@@ -172,6 +172,62 @@ class SessionEngine {
   bool is_stopped_ = true;
 };
 
+// --- Audio-clock tick pacing (transport rework) -----------------------------
+// The `SessionEngine`'s 60 Hz ticks are driven by the AUDIO clock, never by
+// the UI frame rate. `AudioTickClock` converts *rendered device samples*
+// (which the audio callback produces, one buffer at a time) into engine
+// ticks: exactly one 60 Hz tick per (sample_rate / 60) rendered samples at
+// 1.0x, with the transport speed multiplier as a SAMPLE DIVISOR on that
+// period (2.0x -> one tick per half the samples, 0.25x -> four times the
+// samples). The tempo is therefore a function of rendered samples alone and
+// is invariant to display refresh/vsync and to the UI frame rate.
+//
+// Render-interleaving contract: the caller advances the clock in render-sized
+// chunks no larger than samplesUntilNextTick(), rendering audio between
+// advances. That bounds each advance to at most one tick with at least one
+// rendered sample since the previous one, which is what stops the old
+// back-to-back zero-render tick bursts (a NoteOn + NoteOff sharing one sample
+// position is the note MUNT silently drops).
+//
+// Pause/stop accrues no tick debt: while the engine is not advancing the
+// deadline is dragged forward with the clock, so resuming never bursts.
+class AudioTickClock {
+ public:
+  // Sentinel returned by samplesUntilNextTick() when no deadline is armed
+  // (engine paused/stopped): "render as much as you like".
+  static constexpr std::size_t kNoDeadline = static_cast<std::size_t>(-1);
+
+  // Device-native rate of the samples that will be counted. Re-anchors the
+  // next deadline so a device/rate switch takes effect from now.
+  void setSampleRate(int rate);
+  // Transport speed multiplier (0.25 .. 4.0). Non-positive -> 1.0.
+  // Re-anchors the next deadline so a speed change takes effect from now.
+  void setSpeed(double speed);
+
+  // Advances by `frames` newly rendered device samples and dispatches the
+  // 60 Hz tick(s) the clock has reached into `engine`. Returns the tick()
+  // calls made. No dispatch (but the cursor still tracks) while the engine
+  // is not advancing.
+  int advance(SessionEngine& engine, std::size_t frames);
+
+  // Device samples the caller may render before the next tick is due.
+  // Always >= 1 while a deadline is armed, kNoDeadline when none is.
+  std::size_t samplesUntilNextTick() const;
+
+  std::uint64_t renderedSamples() const { return rendered_; }
+  double samplesPerTick() const { return samples_per_tick_; }
+  double speed() const { return speed_; }
+
+ private:
+  double step() const { return samples_per_tick_ / speed_; }
+
+  int sample_rate_ = 48000;
+  double speed_ = 1.0;
+  double samples_per_tick_ = 800.0;  // sample_rate_ / 60.
+  std::uint64_t rendered_ = 0;
+  double next_tick_at_ = 0.0;
+};
+
 }  // namespace audio_dbg
 
 #endif  // PKMN_AUDIO_DBG_SESSION_ENGINE_H_

@@ -274,11 +274,11 @@ void TransportBar::render(SessionEngine& engine, EnhancementManager* enh_mgr) {
   // Row 1: Play/Pause, Stop, readout, seek slider.
   const bool playing =
       engine.isPlaying() && !engine.isPaused() && !engine.isStopped();
-  if (ImGui::Button(playing ? "Pause##transport" : "Play##transport")) {
+  if (ImGui::Button(playing ? "Pause##tb_play" : "Play##tb_play")) {
     togglePlayPause(engine);
   }
   ImGui::SameLine();
-  if (ImGui::Button("Stop##transport")) {
+  if (ImGui::Button("Stop##tb_stop")) {
     stop(engine);
   }
   ImGui::SameLine();
@@ -306,23 +306,23 @@ void TransportBar::render(SessionEngine& engine, EnhancementManager* enh_mgr) {
   ImGui::Text("Loop [A: %u | B: %u]%s", engine.loopStart(), engine.loopEnd(),
               engine.loopEnabled() ? "" : " (off)");
   ImGui::SameLine();
-  if (ImGui::SmallButton("Set [A]##loop")) setLoopStartToCurrent(engine);
+  if (ImGui::SmallButton("Set [A]##loop_set_a")) setLoopStartToCurrent(engine);
   ImGui::SameLine();
-  if (ImGui::SmallButton("Set [B]##loop")) setLoopEndToCurrent(engine);
+  if (ImGui::SmallButton("Set [B]##loop_set_b")) setLoopEndToCurrent(engine);
   ImGui::SameLine();
-  if (ImGui::SmallButton(engine.loopEnabled() ? "Loop: On##loop"
-                                              : "Loop: Off##loop")) {
+  if (ImGui::SmallButton(engine.loopEnabled() ? "Loop: On##loop_toggle"
+                                              : "Loop: Off##loop_toggle")) {
     toggleLoop(engine);
   }
   ImGui::SameLine();
-  if (ImGui::SmallButton("Clear##loop")) clearLoop(engine);
+  if (ImGui::SmallButton("Clear##loop_clear")) clearLoop(engine);
   ImGui::SameLine();
   {
     static constexpr const char* kLabels[] = {"0.25x", "0.5x", "1.0x", "2.0x",
                                               "4.0x"};
     int idx = speed_index_;
     ImGui::SetNextItemWidth(80);
-    if (ImGui::Combo("Speed##transport", &idx, kLabels, kNumSpeeds)) {
+    if (ImGui::Combo("Speed##tb_speed", &idx, kLabels, kNumSpeeds)) {
       setSpeedIndex(idx);
     }
   }
