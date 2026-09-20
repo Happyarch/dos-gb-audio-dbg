@@ -134,15 +134,21 @@ void AudioMixer::resampleInto(SoundDevice* dev, std::size_t frames,
     }
     return;
   }
-  // Let SDL own the ratio entirely: render one output block of device-native
-  // input, Put all of it, then Get what SDL has ready. There is no rate math,
-  // no fractional carry and no priming feed here -- SDL_AudioStream keeps
-  // whatever it has not emitted yet as its own bounded backlog, so the
-  // long-run ratio is exactly in_rate:out_rate with no drift and no latency
-  // creep. `frames` is used as both the input block and the output cap; SDL's
-  // ratio means the two differ by the conversion factor, and the backlog
-  // absorbs the difference.
-  std::size_t dev_frames = frames;
+  // Feed SDL the exact amount of device-native input needed to produce
+  // `frames` output frames at this ratio, tracked with a fractional carry so
+  // the long-run rate is exact (no drift, no backlog creep). SDL_AudioStream
+  // does the actual band-limited resampling; we only compute how much input
+  // to render. Rendering a fixed `frames` of input per block is wrong
+  // whenever in_rate != out_rate (e.g. OPL3's 49716 -> 48000): it starves the
+  // stream and the zero-fill below injects a silence glitch every block.
+  rs->frac += static_cast<double>(frames) * static_cast<double>(rs->in_rate);
+  std::size_t dev_frames =
+      static_cast<std::size_t>(rs->frac / static_cast<double>(rs->out_rate));
+  rs->frac -= static_cast<double>(dev_frames) * static_cast<double>(rs->out_rate);
+  if (!rs->primed) {
+    dev_frames += kResamplerPrime;
+    rs->primed = true;
+  }
   if (dev_frames > dev_scratch_.size()) dev_frames = dev_scratch_.size();
   if (dev_frames == 0) dev_frames = 1;
 

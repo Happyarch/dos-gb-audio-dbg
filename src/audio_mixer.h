@@ -125,15 +125,20 @@ class AudioMixer {
  private:
   // One resampler configuration: a band-limited SDL_AudioStream configured
   // for one in_rate -> out_rate pair. Published atomically by setDevice() and
-  // consumed lock-free by renderBlock(). SDL owns the ratio: the callback
-  // Puts a block's worth of native-rate input and Gets what is available, so
-  // no fractional carry or priming state lives here. A state is never mutated
-  // or freed by setDevice() once published -- the callback that already
-  // loaded it stays valid; retired states are freed in shutdown().
+  // consumed lock-free by renderBlock(). SDL does the band-limited
+  // resampling; the callback feeds it the exact amount of device-native input
+  // needed per output block, tracked by the fractional carry and one-time
+  // priming offset below (the feed amount MUST be rate-scaled -- rendering a
+  // fixed `frames` of input per block starves the stream whenever
+  // in_rate != out_rate). A state is never mutated or freed by setDevice()
+  // once published -- the callback that already loaded it stays valid;
+  // retired states are freed in shutdown().
   struct ResampleState {
     SDL_AudioStream* stream = nullptr;  // null => passthrough (rates equal)
     int in_rate = 0;
     int out_rate = 0;
+    double frac = 0.0;    // fractional input-sample carry (< out_rate)
+    bool primed = false;  // resampler filter-history priming applied once
   };
 
   static void SDLCALL sdlCallback(void* userdata, Uint8* stream, int len);
@@ -172,6 +177,8 @@ class AudioMixer {
   // Floor for the realtime scratch (frames); a larger request is clamped and
   // the tail zero-filled rather than allocating on the audio thread.
   static constexpr std::size_t kScratchFrames = 8192;
+  // Extra input frames fed once to prime the SDL resampler's filter history.
+  static constexpr std::size_t kResamplerPrime = 32;
 };
 
 }  // namespace audio_dbg
