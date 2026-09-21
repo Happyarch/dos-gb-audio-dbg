@@ -810,7 +810,9 @@ int main(int argc, char** argv) {
     if (track_index != last_loaded_track && track_index >= 0 &&
         track_index < static_cast<int>(track_names.size())) {
       mixer.lock();
-      const char* target = (device_tab == 3) ? "gm" : "mt32";
+      // GB-APU tab loads the gb baseline (raw drum instrument ids, no
+      // enhancement tracks); GM tab loads gm; everything else loads mt32.
+      const char* target = (device_tab == 3) ? "gm" : (device_tab == 1) ? "gb" : "mt32";
       loadTrackBaseline(engine, enh_mgr, catalog,
                         track_names[static_cast<std::size_t>(track_index)].c_str(),
                         target, &mt32_dev);
@@ -839,7 +841,9 @@ int main(int argc, char** argv) {
             engine.setActiveDevice(devices[i]);
             clock_shim.setInner(devices[i], device_rates[i]);
             mixer.setDevice(&clock_shim, device_rates[i]);
-            const char* target = (device_tab == 3) ? "gm" : "mt32";
+            // GB-APU tab loads the gb baseline (raw drum instrument ids, no
+            // enhancement tracks); GM tab loads gm; everything else loads mt32.
+            const char* target = (device_tab == 3) ? "gm" : (device_tab == 1) ? "gb" : "mt32";
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
                                 track_names[static_cast<std::size_t>(track_index)].c_str(),

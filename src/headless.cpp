@@ -85,7 +85,12 @@ std::unique_ptr<SoundDevice> createHeadlessDevice(
 }
 
 std::string deviceMidiTarget(const std::string& canonical) {
-  return canonical == "gm" ? "gm" : "mt32";
+  if (canonical == "gm") return "gm";
+  // The GB-APU loads the gb baseline: raw pret drum instrument ids on MIDI
+  // channel 9 and no enhancement tracks (mirrors audition's live gb_events,
+  // which never pass through drum_key or overrides).
+  if (canonical == "gbapu") return "gb";
+  return "mt32";
 }
 
 std::size_t frameSampleCount(std::uint32_t rate, std::uint32_t frame) {

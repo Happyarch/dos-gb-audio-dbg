@@ -209,7 +209,7 @@ int main() {
     CHECK(deviceMidiTarget("mt32") == "mt32");
     CHECK(deviceMidiTarget("gm") == "gm");
     CHECK(deviceMidiTarget("opl3") == "mt32");
-    CHECK(deviceMidiTarget("gbapu") == "mt32");
+    CHECK(deviceMidiTarget("gbapu") == "gb");
     std::uint32_t rate = 0;
     std::string canon, err;
     auto dev = createHeadlessDevice("GB-APU", &rate, &canon, &err);

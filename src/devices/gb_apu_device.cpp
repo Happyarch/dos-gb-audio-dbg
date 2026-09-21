@@ -79,6 +79,41 @@ namespace {
 constexpr std::uint8_t kDefaultWave[16] = {
     0x02, 0x46, 0x8A, 0xCE, 0xFF, 0xFE, 0xED, 0xCC,
     0xBA, 0x98, 0x76, 0x54, 0x43, 0x32, 0x21, 0x11};
+
+// Authentic noise parameters per pret instrument id: (initial volume 0-15,
+// envelope fade period, NR43). Mirrors audition/opl_renderer.py DRUM_PARAMS
+// (used by both the GB precache and the live GB path); the gb MIDI target
+// carries raw instrument ids on channel 9 so this lookup is exact.
+// Unknown ids fall back to (8, 1, 34), as audition does.
+struct DrumParams {
+  int vol;
+  int fade;
+  std::uint8_t nr43;
+};
+DrumParams drumParams(int instrument) {
+  switch (instrument) {
+    case 1: return {12, 1, 51};
+    case 2: return {11, 1, 51};
+    case 3: return {10, 1, 51};
+    case 4: return {8, 1, 51};
+    case 5: return {8, 4, 55};
+    case 6: return {5, 1, 42};
+    case 7: return {4, 1, 43};
+    case 8: return {8, 1, 16};
+    case 9: return {8, 2, 35};
+    case 10: return {8, 2, 37};
+    case 11: return {8, 2, 38};
+    case 12: return {10, 1, 16};
+    case 13: return {10, 2, 17};
+    case 14: return {10, 2, 80};
+    case 15: return {10, 1, 24};
+    case 16: return {9, 1, 40};
+    case 17: return {9, 1, 34};
+    case 18: return {7, 1, 34};
+    case 19: return {6, 1, 34};
+    default: return {8, 1, 34};
+  }
+}
 }  // namespace
 
 GbApuDevice::GbApuDevice(int device_id, std::string device_name,
@@ -365,7 +400,10 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
       } else if (ch == 2) {
         writeRegister(0xFF1C, 0x00);
       } else if (ch == 3) {
+        // Mirrors audition's silence_channel(3): zero volume + retrigger so
+        // the voice stops immediately.
         writeRegister(0xFF21, 0x00);
+        writeRegister(0xFF23, 0x80);
       }
       channel(ch).active = false;
       return;
@@ -403,22 +441,13 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
       writeRegister(0xFF1D, lo);
       writeRegister(0xFF1E, hi);
     } else if (ch == 3) {
-      std::uint8_t best_nr43 = 0;
-      double min_diff = 1e9;
-      for (int s = 0; s < 14; ++s) {
-        for (int r = 0; r < 8; ++r) {
-          const std::uint8_t code = static_cast<std::uint8_t>((s << 4) | r);
-          const double nf = noiseFreqHz(code);
-          const double diff = std::fabs(nf - f);
-          if (diff < min_diff) {
-            min_diff = diff;
-            best_nr43 = code;
-          }
-        }
-      }
-      writeRegister(0xFF20, 0x00);
-      writeRegister(0xFF21, static_cast<std::uint8_t>(vol << 4));
-      writeRegister(0xFF22, best_nr43);
+      // Raw pret noise instrument id (gb MIDI target). Mirrors audition's
+      // trigger_noise via DRUM_PARAMS: per-instrument volume/envelope/NR43
+      // (including 7-bit width codes the old GM pitch-match search could
+      // never produce). Envelope fade direction is always decay, as there.
+      const DrumParams p = drumParams(note);
+      writeRegister(0xFF21, static_cast<std::uint8_t>((p.vol << 4) | p.fade));
+      writeRegister(0xFF22, p.nr43);
       writeRegister(0xFF23, 0x80);
     }
   } else if (opcode == 0x80) {
@@ -429,7 +458,9 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
     } else if (ch == 2) {
       writeRegister(0xFF1C, 0x00);
     } else if (ch == 3) {
+      // Mirrors audition's silence_channel(3).
       writeRegister(0xFF21, 0x00);
+      writeRegister(0xFF23, 0x80);
     }
     channel(ch).active = false;
   }

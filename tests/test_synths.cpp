@@ -348,6 +348,36 @@ int main() {
     std::printf("PASS gbapu rendering + dormant escape\n");
   }
 
+  // --- GB-APU: noise drums resolve via DRUM_PARAMS (audition mirror) ------
+  {
+    GbApuDevice dev;
+    CHECK(dev.init());
+    // MIDI channel 9 carries raw pret noise instrument ids (gb baseline).
+    const std::uint8_t on17[3] = {9, 17, 100};
+    dev.handleCommand(0x90, on17, 3);
+    CHECK(dev.readRegister(0xFF21) == 0x91);  // vol 9, fade 1.
+    CHECK(dev.readRegister(0xFF22) == 0x22);  // DRUM_PARAMS[17].nr43.
+    CHECK(!dev.noiseSevenBit());
+    CHECK(dev.psgChannel(3).active);
+    const std::uint8_t off17[3] = {9, 17, 0};
+    dev.handleCommand(0x90, off17, 3);
+    CHECK(dev.readRegister(0xFF21) == 0x00);
+    CHECK(dev.readRegister(0xFF23) == 0x80);  // silence retrigger.
+    // 7-bit instrument: id 15 -> NR43 0x18 (width flag set).
+    const std::uint8_t on15[3] = {9, 15, 100};
+    dev.handleCommand(0x90, on15, 3);
+    CHECK(dev.readRegister(0xFF21) == 0xA1);  // vol 10, fade 1.
+    CHECK(dev.readRegister(0xFF22) == 0x18);
+    CHECK(dev.noiseSevenBit());
+    // Unknown id falls back to (8, 1, 34), as audition does.
+    const std::uint8_t on99[3] = {9, 99, 100};
+    dev.handleCommand(0x90, on99, 3);
+    CHECK(dev.readRegister(0xFF21) == 0x81);  // vol 8, fade 1.
+    CHECK(dev.readRegister(0xFF22) == 0x22);
+    dev.shutdown();
+    std::printf("PASS gbapu noise drum params\n");
+  }
+
   if (g_failures == 0) {
     std::printf("ALL PASS (%d checks)\n", g_checks);
     return 0;
