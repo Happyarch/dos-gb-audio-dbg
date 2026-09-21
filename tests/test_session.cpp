@@ -462,6 +462,23 @@ int main() {
     // Missing song / missing file -> empty, never a crash.
     CHECK(mgr.loadSongBaseline("Nope_NotASong", "mt32").empty());
     CHECK(mgr.loadMidiFile("/nonexistent/path.mid").empty());
+    // Loop markers: the SMF "loopStart"/"loopEnd" marker meta events carry the
+    // song's loop point (gb_to_midi.py). PalletTown has an intro (loop_start
+    // 1920) so its loop must NOT be the whole-song 0..end; JigglypuffSong is
+    // a through-composed one-shot (loop_start None) so it reports no loop.
+    {
+      audio_dbg::MidiFileData loop = mgr.parseMidiFile(
+          mgr.midiPathFor("Music_PalletTown", "mt32"));
+      std::printf("INFO pallet loop: start=%u end=%u\n",
+                  loop.loop_start_frame, loop.loop_end_frame);
+      CHECK(loop.loop_end_frame > loop.loop_start_frame);
+      CHECK(loop.loop_start_frame > 0);
+      audio_dbg::MidiFileData oneshot = mgr.parseMidiFile(
+          mgr.midiPathFor("Music_JigglypuffSong", "mt32"));
+      std::printf("INFO jiggly loop: start=%u end=%u\n",
+                  oneshot.loop_start_frame, oneshot.loop_end_frame);
+      CHECK(oneshot.loop_start_frame == 0 && oneshot.loop_end_frame == 0);
+    }
     // GM spot check on a track that ships a gm rendering.
     std::vector<SimNoteEvent> gm_base =
         mgr.loadSongBaseline("Music_Routes1", "gm");

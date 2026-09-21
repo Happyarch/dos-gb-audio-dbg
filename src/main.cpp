@@ -156,9 +156,14 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   for (const audio_dbg::SimNoteEvent& e : base) {
     max_frame = std::max(max_frame, e.frame);
   }
+  // Keep the loop wrap point inside the playable range: the loopEnd marker
+  // sits one past the last loop-body note, which can exceed the last note's
+  // frame by a tick boundary.
+  if (midi.loop_end_frame > max_frame) max_frame = midi.loop_end_frame;
   engine.stop();
   engine.setEvents(base);
   engine.setTotalFrames(max_frame + 1);
+  engine.setSongLoop(midi.loop_start_frame, midi.loop_end_frame);
   engine.setLoop(0, 0);
   enh_mgr.watchSong(info->header_label);
   std::vector<audio_dbg::SimNoteEvent> enh =

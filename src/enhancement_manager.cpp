@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
@@ -194,7 +195,8 @@ bool extractTempos(SmfReader* r, std::size_t track_end,
 // encounter order when `sysex_out` is non-null; otherwise they are skipped.
 template <typename F>
 bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
-                   std::vector<SimNoteEvent>* out, SysExMessages* sysex_out) {
+                   std::vector<SimNoteEvent>* out, SysExMessages* sysex_out,
+                   std::uint32_t* loop_start_tick, std::uint32_t* loop_end_tick) {
   std::uint32_t tick = 0;
   std::uint8_t running = 0;
   std::vector<std::pair<std::uint32_t, int> > pending[16][128];
@@ -212,10 +214,26 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
     }
     if (status == 0xFF) {
       const std::uint8_t mtype = r->u8();
-      (void)mtype;
       const std::uint32_t len = r->vlq();
       if (!r->ok()) return false;
-      r->skip(len);
+      if (mtype == 0x06 && (len == 9 || len == 7)) {
+        // Marker text meta event: "loopStart"/"loopEnd" carry the song's
+        // loop point (written by gb_to_midi.py, read by midi_to_stream.py).
+        char text[9] = {0};
+        for (std::uint32_t i = 0; i < len; ++i) {
+          text[i] = static_cast<char>(r->u8());
+          if (!r->ok()) return false;
+        }
+        if (len == 9 && loop_start_tick != nullptr &&
+            std::memcmp(text, "loopStart", 9) == 0) {
+          *loop_start_tick = tick;
+        } else if (len == 7 && loop_end_tick != nullptr &&
+                   std::memcmp(text, "loopEnd", 7) == 0) {
+          *loop_end_tick = tick;
+        }
+      } else {
+        r->skip(len);
+      }
       running = 0;
     } else if (status == 0xF0 || status == 0xF7) {
       const std::uint32_t len = r->vlq();
@@ -697,12 +715,23 @@ MidiFileData EnhancementManager::parseMidiFile(
 
   // Pass 2: parse each track with per-track Note-Off to Note-On matching,
   // retaining embedded SysEx frames instead of skipping them.
+  // The loopEnd marker is always written (even one-shot songs), but loopStart
+  // is only written when the song actually loops (`loop_start is not None`).
+  // A sentinel distinguishes "loop from frame 0" (marker at tick 0) from
+  // "no loop at all" (marker absent).
+  constexpr std::uint32_t kNoTick = UINT32_MAX;
+  std::uint32_t loop_start_tick = kNoTick;
+  std::uint32_t loop_end_tick = kNoTick;
   for (const auto& ti : track_infos) {
     r.seek(ti.start_pos);
     if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &result.notes,
-                       &result.sysex)) {
+                       &result.sysex, &loop_start_tick, &loop_end_tick)) {
       return result;
     }
+  }
+  if (loop_start_tick != kNoTick && loop_end_tick != kNoTick) {
+    result.loop_end_frame = tickToFrame(loop_end_tick);
+    result.loop_start_frame = tickToFrame(loop_start_tick);
   }
 
   std::stable_sort(result.notes.begin(), result.notes.end(), eventLess);

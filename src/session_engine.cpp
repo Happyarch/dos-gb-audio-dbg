@@ -58,6 +58,11 @@ void SessionEngine::setLoop(std::uint32_t start, std::uint32_t end) {
   loop_end_ = end;
 }
 
+void SessionEngine::setSongLoop(std::uint32_t start, std::uint32_t end) {
+  song_loop_start_ = start;
+  song_loop_end_ = end;
+}
+
 void SessionEngine::setActiveDevice(SoundDevice* dev) {
   if (dev == active_device_) return;
   silenceActiveDevice();  // Outgoing device: no stuck notes.

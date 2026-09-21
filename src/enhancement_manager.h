@@ -69,6 +69,10 @@ struct SongTimbreSysex {
 struct MidiFileData {
   std::vector<SimNoteEvent> notes;
   SysExMessages sysex;
+  // Song loop points from the SMF "loopStart"/"loopEnd" marker meta events,
+  // in frame units. 0/0 = none present (a through-composed song).
+  std::uint32_t loop_start_frame = 0;
+  std::uint32_t loop_end_frame = 0;
 };
 
 // --- Runtime Python bridge mechanics (header-inline) -----------------------

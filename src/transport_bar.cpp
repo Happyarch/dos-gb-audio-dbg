@@ -185,6 +185,8 @@ void TransportBar::setLoopEnabled(SessionEngine& engine, bool enabled) {
     engine.setLoop(0, 0);
   } else if (have_saved_loop_ && saved_loop_end_ > saved_loop_start_) {
     engine.setLoop(saved_loop_start_, saved_loop_end_);
+  } else if (engine.hasSongLoop()) {
+    engine.setLoop(engine.songLoopStart(), engine.songLoopEnd());
   } else if (engine.totalFrames() > 0) {
     engine.setLoop(0, engine.totalFrames());
   }

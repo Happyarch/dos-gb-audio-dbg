@@ -81,6 +81,13 @@ class SessionEngine {
   void seekToFrame(std::uint32_t target);  // Clamped to total_frames.
   void setLoop(std::uint32_t start, std::uint32_t end);  // Enabled iff end > start.
   void setTotalFrames(std::uint32_t frames) { total_frames_ = frames; }
+  // Song loop points (from the SMF "loopStart"/"loopEnd" markers). The
+  // transport bar uses these when the user toggles loop on, instead of the
+  // whole-song 0..totalFrames default.
+  void setSongLoop(std::uint32_t start, std::uint32_t end);
+  std::uint32_t songLoopStart() const { return song_loop_start_; }
+  std::uint32_t songLoopEnd() const { return song_loop_end_; }
+  bool hasSongLoop() const { return song_loop_end_ > song_loop_start_; }
 
   // --- Device routing ---
   // Not owned. May be null (ticks still advance the frame counter).
@@ -167,6 +174,8 @@ class SessionEngine {
   std::uint32_t total_frames_ = 0;
   std::uint32_t loop_start_ = 0;
   std::uint32_t loop_end_ = 0;  // == start (or 0) = loop disabled.
+  std::uint32_t song_loop_start_ = 0;
+  std::uint32_t song_loop_end_ = 0;  // == start (or 0) = no song loop.
   bool is_playing_ = false;
   bool is_paused_ = false;
   bool is_stopped_ = true;
