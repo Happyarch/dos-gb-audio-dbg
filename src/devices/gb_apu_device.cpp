@@ -23,22 +23,32 @@ namespace audio_dbg {
 // is bit-identical to Basic_Gb_Apu while allocating ~50 KB per buffer.
 struct GbVoiceApu {
   Gb_Apu apu;
-  Stereo_Buffer buf;
+  // One stereo buffer per oscillator (0=Sq1, 1=Sq2, 2=Wave, 3=Noise), so a
+  // SINGLE Gb_Apu yields both the mixed sum and each channel's isolated stem
+  // (for scopes) and per-channel mute/solo by skipping that oscillator in the
+  // sum -- mGBA's channel-disable mask, not a second chip. This matches
+  // audition.py: one APU, one deterministic end_frame() per 60 Hz tick.
+  Stereo_Buffer buf[4];
   blip_time_t time = 0;
 
   static constexpr blip_time_t kFrameLength = 70224;
   static constexpr int kBufferMsec = 500;
+  static constexpr int kOscCount = 4;
 
   GbVoiceApu() {
     // Match Basic_Gb_Apu's "tiny speaker" equalization.
     apu.treble_eq(-20.0);
-    buf.bass_freq(461);
+    for (int i = 0; i < kOscCount; ++i) buf[i].bass_freq(461);
   }
 
   blargg_err_t set_sample_rate(long rate) {
-    apu.output(buf.center(), buf.left(), buf.right());
-    buf.clock_rate(4194304);
-    return buf.set_sample_rate(rate, kBufferMsec);
+    for (int i = 0; i < kOscCount; ++i) {
+      buf[i].clock_rate(4194304);
+      const blargg_err_t err = buf[i].set_sample_rate(rate, kBufferMsec);
+      if (err != nullptr) return err;
+      apu.osc_output(i, buf[i].center(), buf[i].left(), buf[i].right());
+    }
+    return nullptr;
   }
 
   blip_time_t clock() { return time += 4; }
@@ -52,13 +62,15 @@ struct GbVoiceApu {
   void end_frame() {
     time = 0;
     const bool stereo = apu.end_frame(kFrameLength);
-    buf.end_frame(kFrameLength, stereo);
+    for (int i = 0; i < kOscCount; ++i) {
+      buf[i].end_frame(kFrameLength, stereo);
+    }
   }
 
-  long samples_avail() const { return buf.samples_avail(); }
+  long samples_avail(int ch) const { return buf[ch].samples_avail(); }
 
-  long read_samples(blip_sample_t* out, long count) {
-    return buf.read_samples(out, count);
+  long read_samples(int ch, blip_sample_t* out, long count) {
+    return buf[ch].read_samples(out, count);
   }
 };
 
@@ -74,7 +86,6 @@ GbApuDevice::GbApuDevice(int device_id, std::string device_name,
     : PsgDevice(device_id, std::move(device_name), kChannels),
       sample_rate_(sample_rate <= 0 ? kDefaultRate : sample_rate) {
   regs_.fill(0);
-  shadow_init_.fill(false);
 }
 
 GbApuDevice::~GbApuDevice() {
@@ -83,33 +94,25 @@ GbApuDevice::~GbApuDevice() {
 
 bool GbApuDevice::init() {
   if (inited_) return true;
-  if (master_ == nullptr) {
-    master_ = new (std::nothrow) GbVoiceApu();
-    if (master_ == nullptr) return false;
+  if (apu_ == nullptr) {
+    apu_ = new (std::nothrow) GbVoiceApu();
+    if (apu_ == nullptr) return false;
   }
-  if (master_->set_sample_rate(sample_rate_) != 0) return false;
+  if (apu_->set_sample_rate(sample_rate_) != 0) return false;
   // Realtime render scratch, sized once on the UI thread: no allocation is
-  // allowed inside render()/drainApu(). Guarded by `inited_`; resize() on
-  // this path never touches a running callback.
+  // allowed inside render(). Guarded by `inited_`; resize() on this path
+  // never touches a running callback.
   tmp_scratch_.assign(kScratchFrames, 0.0f);
-  discard_scratch_.assign(kScratchFrames, 0.0f);
   regs_.fill(0);
-  shadow_init_.fill(false);
-  for (int i = 0; i < kChannels; ++i) {
-    if (shadows_[i] != nullptr) {
-      delete shadows_[i];
-      shadows_[i] = nullptr;
-    }
-  }
-  // Master init sequence (mirrors audition gb_synth.cpp).
-  master_->write_register(0xFF26, 0x80);
+  // Init sequence (mirrors audition gb_synth.cpp).
+  apu_->write_register(0xFF26, 0x80);
   regs_[0x26 - 0x10] = 0x80;
-  master_->write_register(0xFF24, 0x77);
+  apu_->write_register(0xFF24, 0x77);
   regs_[0x24 - 0x10] = 0x77;
-  master_->write_register(0xFF25, 0xFF);
+  apu_->write_register(0xFF25, 0xFF);
   regs_[0x25 - 0x10] = 0xFF;
   for (int i = 0; i < 16; ++i) {
-    master_->write_register(static_cast<unsigned>(0xFF30 + i), kDefaultWave[i]);
+    apu_->write_register(static_cast<unsigned>(0xFF30 + i), kDefaultWave[i]);
     regs_[0x20 + i] = kDefaultWave[i];
   }
   inited_ = true;
@@ -117,42 +120,29 @@ bool GbApuDevice::init() {
 }
 
 void GbApuDevice::shutdown() {
-  if (master_ != nullptr) {
-    delete master_;
-    master_ = nullptr;
+  if (apu_ != nullptr) {
+    delete apu_;
+    apu_ = nullptr;
   }
-  for (int i = 0; i < kChannels; ++i) {
-    if (shadows_[i] != nullptr) {
-      delete shadows_[i];
-      shadows_[i] = nullptr;
-    }
-  }
-  shadow_init_.fill(false);
   inited_ = false;
 }
 
 void GbApuDevice::reset() {
-  if (!inited_ || master_ == nullptr) return;
+  if (!inited_ || apu_ == nullptr) return;
   // Toggle NR52 + restore globals + wave RAM (mirrors gb_synth reset).
-  master_->write_register(0xFF26, 0x00);
-  master_->write_register(0xFF26, 0x80);
-  master_->write_register(0xFF24, 0x77);
-  master_->write_register(0xFF25, 0xFF);
+  apu_->write_register(0xFF26, 0x00);
+  apu_->write_register(0xFF26, 0x80);
+  apu_->write_register(0xFF24, 0x77);
+  apu_->write_register(0xFF25, 0xFF);
   for (int i = 0; i < 16; ++i) {
-    master_->write_register(static_cast<unsigned>(0xFF30 + i), kDefaultWave[i]);
+    apu_->write_register(static_cast<unsigned>(0xFF30 + i), kDefaultWave[i]);
   }
   regs_.fill(0);
   regs_[0x26 - 0x10] = 0x80;
   regs_[0x24 - 0x10] = 0x77;
   regs_[0x25 - 0x10] = 0xFF;
   for (int i = 0; i < 16; ++i) regs_[0x20 + i] = kDefaultWave[i];
-  // Drop shadows: they re-lazy-init on next write (keeps reset cheap and
-  // preserves the dormant invariant for never-touched channels).
   for (int i = 0; i < kChannels; ++i) {
-    if (shadows_[i] != nullptr) {
-      delete shadows_[i];
-      shadows_[i] = nullptr;
-    }
     if (channelValid(i)) {
       channel(i).active = false;
       channel(i).freq = 0.0f;
@@ -161,7 +151,6 @@ void GbApuDevice::reset() {
       channel(i).peak = 0.0f;
     }
   }
-  shadow_init_.fill(false);
 }
 
 int GbApuDevice::channelForAddr(std::uint16_t addr) {
@@ -177,53 +166,12 @@ bool GbApuDevice::isGlobalAddr(std::uint16_t addr) {
   return addr == 0xFF24 || addr == 0xFF25 || addr == 0xFF26;
 }
 
-void GbApuDevice::pushToApu(GbVoiceApu* apu, std::uint16_t addr,
-                            std::uint8_t val) {
-  if (apu == nullptr) return;
-  apu->write_register(addr, val);
-}
-
-void GbApuDevice::ensureShadow(int ch) {
-  if (ch < 0 || ch >= kChannels) return;
-  if (shadow_init_[static_cast<std::size_t>(ch)]) return;
-  if (!inited_) return;
-  if (shadows_[ch] == nullptr) {
-    shadows_[ch] = new (std::nothrow) GbVoiceApu();
-    if (shadows_[ch] == nullptr) return;
-    if (shadows_[ch]->set_sample_rate(sample_rate_) != 0) {
-      delete shadows_[ch];
-      shadows_[ch] = nullptr;
-      return;
-    }
-  }
-  GbVoiceApu* sh = shadows_[ch];
-  // Replay globals + wave RAM + this channel's registers.
-  sh->write_register(0xFF26, regs_[0x26 - 0x10] | 0x80);
-  sh->write_register(0xFF24, regs_[0x24 - 0x10]);
-  sh->write_register(0xFF25, regs_[0x25 - 0x10]);
-  for (int i = 0; i < 16; ++i) {
-    sh->write_register(static_cast<unsigned>(0xFF30 + i),
-                       regs_[0x20 + i]);
-  }
-  const std::uint16_t addrs[4][5] = {
-      {0xFF10, 0xFF11, 0xFF12, 0xFF13, 0xFF14},
-      {0xFF16, 0xFF16, 0xFF17, 0xFF18, 0xFF19},
-      {0xFF1A, 0xFF1B, 0xFF1C, 0xFF1D, 0xFF1E},
-      {0xFF20, 0xFF21, 0xFF22, 0xFF23, 0xFFFF},
-  };
-  // ch1 has no sweep reg; slot [1] duplicates NR21 for the replay loop.
-  for (int i = 0; i < 5; ++i) {
-    const std::uint16_t a = addrs[ch][i];
-    if (a == 0xFFFF) break;
-    if (ch == 1 && i == 0) continue;  // No FF15; skip the placeholder.
-    sh->write_register(a, regs_[a - 0xFF10]);
-  }
-  shadow_init_[static_cast<std::size_t>(ch)] = true;
-}
-
 bool GbApuDevice::isShadowInitialized(int ch) const {
+  // Single-APU model: there is no shadow chip. "Initialized" now means the
+  // channel has been woken (written) since init/reset -- the same sticky
+  // state the old shadow lazy-init tracked.
   if (ch < 0 || ch >= kChannels) return false;
-  return shadow_init_[static_cast<std::size_t>(ch)];
+  return !isDormant(ch);
 }
 
 double GbApuDevice::pulseFreqHz(int freq_val) {
@@ -362,29 +310,18 @@ void GbApuDevice::decodeAndTrack(std::uint16_t addr, std::uint8_t val) {
 }
 
 void GbApuDevice::writeRegister(std::uint16_t addr, std::uint8_t val) {
-  if (!inited_ || master_ == nullptr) return;
+  if (!inited_ || apu_ == nullptr) return;
   if (addr < kRegBase || addr > kRegEnd) return;
   regs_[addr - 0xFF10] = val;
-  if (isGlobalAddr(addr)) {
-    pushToApu(master_, addr, val);
-    for (int c = 0; c < kChannels; ++c) {
-      if (shadow_init_[static_cast<std::size_t>(c)] && shadows_[c] != nullptr) {
-        pushToApu(shadows_[c], addr, val);
-      }
-    }
-    return;
+  apu_->write_register(addr, val);
+  // Decode into the PsgDevice base for the UI (duty/frequency/volume/active/
+  // dormancy). The single Gb_Apu already got the write above; decode only
+  // updates the decoded state -- there is no register re-push (audition
+  // writes each register exactly once).
+  if (!isGlobalAddr(addr)) {
+    const int ch = channelForAddr(addr);
+    if (ch >= 0) decodeAndTrack(addr, val);
   }
-  const int ch = channelForAddr(addr);
-  if (ch < 0) return;  // Unused gap (FF15/FF1F/FF27-FF2F): shadow only.
-  ensureShadow(ch);
-  pushToApu(master_, addr, val);
-  if (shadow_init_[static_cast<std::size_t>(ch)] && shadows_[ch] != nullptr) {
-    pushToApu(shadows_[ch], addr, val);
-  }
-  // Decode into the PsgDevice base (wakes the channel; setters re-push the
-  // same registers through applyRegister — benign duplicates at control
-  // rate that keep the single chip-write path in the hook).
-  decodeAndTrack(addr, val);
 }
 
 std::uint8_t GbApuDevice::readRegister(std::uint16_t addr) const {
@@ -393,35 +330,12 @@ std::uint8_t GbApuDevice::readRegister(std::uint16_t addr) const {
 }
 
 void GbApuDevice::applyRegister(int ch) {
-  if (ch < 0 || ch >= kChannels || !inited_ || master_ == nullptr) return;
-  ensureShadow(ch);
-  // Push this channel's full register set from the shadow matrix so direct
-  // base-setter calls (setDuty/setVolume/...) land on both chips.
-  const std::uint16_t sets[4][6] = {
-      {0xFF10, 0xFF11, 0xFF12, 0xFF13, 0xFF14, 0xFFFF},
-      {0xFF16, 0xFF17, 0xFF18, 0xFF19, 0xFFFF, 0xFFFF},
-      {0xFF1A, 0xFF1B, 0xFF1C, 0xFF1D, 0xFF1E, 0xFFFF},
-      {0xFF20, 0xFF21, 0xFF22, 0xFF23, 0xFFFF, 0xFFFF},
-  };
-  for (int i = 0; i < 6; ++i) {
-    const std::uint16_t a = sets[ch][i];
-    if (a == 0xFFFF) break;
-    const std::uint8_t v = regs_[a - 0xFF10];
-    pushToApu(master_, a, v);
-    if (shadow_init_[static_cast<std::size_t>(ch)] && shadows_[ch] != nullptr) {
-      pushToApu(shadows_[ch], a, v);
-    }
-  }
-  if (ch == 2) {
-    for (int i = 0; i < 16; ++i) {
-      const std::uint16_t a = static_cast<std::uint16_t>(0xFF30 + i);
-      const std::uint8_t v = regs_[0x20 + i];
-      pushToApu(master_, a, v);
-      if (shadow_init_[2] && shadows_[2] != nullptr) {
-        pushToApu(shadows_[2], a, v);
-      }
-    }
-  }
+  // Single-APU model: writeRegister() already delivered the write to the
+  // Gb_Apu. The base setters (setFrequency/setDuty/...) only update the
+  // decoded UI state, so there is nothing to re-push here. (The old shadow
+  // fan-out re-triggered NR14 with stale/mixed registers -- a genuine
+  // misapplication deleted with the shadow layer.)
+  (void)ch;
 }
 
 void GbApuDevice::handleCommand(std::uint8_t opcode,
@@ -433,7 +347,11 @@ void GbApuDevice::handleCommand(std::uint8_t opcode,
   else if (raw_ch == 3) ch = 2;  // MIDI ch 3 -> GB Wave (ch 2)
   else if (raw_ch == 2) ch = 1;  // MIDI ch 2 -> GB Pulse 2 (ch 1)
   else if (raw_ch == 1 || raw_ch == 0) ch = 0; // MIDI ch 1 / 0 -> GB Pulse 1 (ch 0)
-  else ch = raw_ch % kChannels;
+  else return;  // MIDI ch 4-8 are the MT-32 enhancement tracks (sub_bass,
+                // low_pad, sparkle): not GB voices. audition.py drives only the
+                // 4 pret GB channels; the old `% kChannels` fold retriggered
+                // the melody voice at bass pitch -- the "misses notes + off
+                // key" bug. Drop them.
   wakeChannel(ch);
 
   if (opcode == 0x90 && len >= 3) {
@@ -585,106 +503,68 @@ bool GbApuDevice::hasMutedChannel() const {
   return false;
 }
 
-std::size_t GbApuDevice::drainApu(GbVoiceApu* apu, float* out,
-                                  std::size_t max_frames) {
-  if (apu == nullptr || out == nullptr || max_frames == 0) return 0;
+std::size_t GbApuDevice::readStem(int ch, float* out, std::size_t frames,
+                                  bool accumulate) {
+  if (out == nullptr || frames == 0 || apu_ == nullptr) return 0;
+  constexpr float kGbLevelScale = 0.55f;
   std::size_t done = 0;
-  while (done < max_frames) {
-    long avail = apu->samples_avail();  // Total int16 stereo samples.
+  blip_sample_t tmp[512];
+  while (done < frames) {
+    long avail = apu_->samples_avail(ch);
     if (avail < 2) {
-      apu->end_frame();
-      avail = apu->samples_avail();
+      // Lazy frame synthesis: the single APU produces one ~803.6-sample frame
+      // when its buffers run dry. All four oscillators advance in lockstep, so
+      // whichever channel drains first triggers the shared end_frame().
+      apu_->end_frame();
+      avail = apu_->samples_avail(ch);
       if (avail < 2) break;
     }
-    const std::size_t needed_mono = max_frames - done;
-    const std::size_t needed_stereo = needed_mono * 2;
+    const std::size_t needed_stereo = (frames - done) * 2;
     const long to_read = static_cast<long>(
         std::min(static_cast<std::size_t>(avail), needed_stereo)) & ~1L;
     if (to_read <= 0) break;
-
-    blip_sample_t tmp[512];
     const long chunk = std::min(to_read, 512L);
-    const long got = apu->read_samples(tmp, chunk);
+    const long got = apu_->read_samples(ch, tmp, chunk);
     if (got <= 0) break;
-    const std::size_t mono_got = static_cast<std::size_t>(got) / 2;
-    for (std::size_t i = 0; i < mono_got; ++i) {
-      const float l =
-          static_cast<float>(tmp[i * 2]) / 32768.0f;
-      const float r =
-          static_cast<float>(tmp[i * 2 + 1]) / 32768.0f;
-      constexpr float kGbLevelScale = 0.55f;
-      out[done++] = (l + r) * 0.5f * kGbLevelScale;
+    const std::size_t mono = static_cast<std::size_t>(got) / 2;
+    for (std::size_t i = 0; i < mono; ++i) {
+      const float l = static_cast<float>(tmp[i * 2]) / 32768.0f;
+      const float r = static_cast<float>(tmp[i * 2 + 1]) / 32768.0f;
+      const float v = (l + r) * 0.5f * kGbLevelScale;
+      if (accumulate) out[done + i] += v; else out[done + i] = v;
     }
+    done += mono;
   }
   return done;
 }
 
 void GbApuDevice::render(float* buf, std::size_t frames) {
   if (buf == nullptr || frames == 0) return;
-  if (!inited_ || master_ == nullptr) {
+  if (!inited_ || apu_ == nullptr) {
     std::memset(buf, 0, frames * sizeof(float));
     return;
   }
-  // Snapshot-free realtime path: the mix scratch + drain sink are members
-  // sized at init(), and the mute/solo decision reads the lock-free gate
-  // cache (refreshAudibleCache(), UI thread) rather than re-snapshotting.
-  const bool any_gate = any_solo_ || hasMutedChannel();
-  if (!any_gate) {
-    const std::size_t got = drainApu(master_, buf, frames);
-    if (got < frames) {
-      std::memset(buf + got, 0, (frames - got) * sizeof(float));
-    }
-    // Keep shadows clocked when they are awake so a later stem render does
-    // not observe a stale frame, and tap their output into the scope ring
-    // (audio thread; the UI only reads it via copyWaveform). Dormant shadows
-    // take the fast escape.
-    for (int c = 0; c < kChannels; ++c) {
-      if (isDormant(c) || !shadow_init_[static_cast<std::size_t>(c)]) continue;
-      float* tap = discard_scratch_.data();
-      std::size_t rem = frames;
-      while (rem > 0) {
-        const std::size_t step =
-            std::min(rem, discard_scratch_.size());
-        const std::size_t got = drainApu(shadows_[c], tap, step);
-        if (got == 0) break;  // Defensive: never spin on a dry APU.
-        pushWaveform(c, tap, got);
-        rem -= got;  // drainApu returns the frames actually produced.
-      }
-    }
-  } else {
-    std::memset(buf, 0, frames * sizeof(float));
+  std::memset(buf, 0, frames * sizeof(float));
+  // Sum each audible oscillator stem. The mute/solo gate is the lock-free
+  // per-channel cache (channelAudible). Awake-but-not-audible channels are
+  // still drained (into scratch) so their buffer never accumulates stale
+  // audio, and each awake stem is tapped into the scope ring.
+  const std::size_t n = std::min(frames, tmp_scratch_.size());
+  for (int c = 0; c < kChannels; ++c) {
+    if (isDormant(c)) continue;  // Fast escape: untouched oscillator.
     float* tmp = tmp_scratch_.data();
-    // The scratch is sized for the mixer's block; clamp rather than write
-    // past it. The unrendered tail stays zero (already memset above).
-    const std::size_t rem = std::min(frames, tmp_scratch_.size());
-    for (int c = 0; c < kChannels; ++c) {
-      if (isDormant(c)) continue;  // Fast escape.
-      if (!channelAudible(c)) continue;
-      if (!shadow_init_[static_cast<std::size_t>(c)]) continue;
-      const std::size_t got = drainApu(shadows_[c], tmp, rem);
+    const std::size_t got = readStem(c, tmp, n, /*accumulate=*/false);
+    if (channelAudible(c)) {
       for (std::size_t i = 0; i < got; ++i) buf[i] += tmp[i];
       pushWaveform(c, tmp, got);  // Audio-thread scope tap.
-    }
-    // Any frames past the scratch window stay silent; the clamp above is the
-    // only place `frames` can exceed tmp_scratch_ (the mixer never does).
-    for (std::size_t i = 0; i < frames; ++i) {
-      if (buf[i] > 1.0f)
-        buf[i] = 1.0f;
-      else if (buf[i] < -1.0f)
-        buf[i] = -1.0f;
-    }
-    // Keep the master clocked so a later unmuted render stays continuous.
-    std::size_t mrem = frames;
-    while (mrem > 0) {
-      const std::size_t step = std::min(mrem, discard_scratch_.size());
-      const std::size_t got =
-          drainApu(master_, discard_scratch_.data(), step);
-      if (got == 0) break;  // Defensive: never spin on a dry APU.
-      mrem -= got;
     }
   }
   float peak = 0.0f;
   for (std::size_t i = 0; i < frames; ++i) {
+    if (buf[i] > 1.0f)
+      buf[i] = 1.0f;
+    else if (buf[i] < -1.0f)
+      buf[i] = -1.0f;
     const float a = std::fabs(buf[i]);
     if (a > peak) peak = a;
   }
@@ -708,37 +588,15 @@ DeviceSnapshot GbApuDevice::snapshot() const {
 
 void GbApuDevice::renderPerChannel(float** bufs, std::size_t frames) {
   if (bufs == nullptr || frames == 0) return;
-  if (!inited_) {
-    for (int c = 0; c < kChannels; ++c) {
-      if (bufs[c] != nullptr) std::memset(bufs[c], 0, frames * sizeof(float));
-    }
-    return;
-  }
   for (int c = 0; c < kChannels; ++c) {
     float* out = bufs[c];
     if (out == nullptr) continue;
-    // Fast escape: dormant channels cost a bounds-checked load + memset —
-    // no shadow-APU stepping.
-    if (isDormant(c) || !shadow_init_[static_cast<std::size_t>(c)]) {
+    // Dormant, not-inited, or muted/solo-excluded channels are silence.
+    if (!inited_ || apu_ == nullptr || isDormant(c) || !channelAudible(c)) {
       std::memset(out, 0, frames * sizeof(float));
       continue;
     }
-    if (!channelAudible(c)) {
-      std::memset(out, 0, frames * sizeof(float));
-      // Still step the shadow so unmuting resumes in sync. renderPerChannel
-      // runs on the stems/UI thread, NOT the audio callback, so it keeps its
-      // own stack sink rather than sharing the callback's member scratch.
-      float discard[64];
-      std::size_t rem = frames;
-      while (rem > 0) {
-        const std::size_t step = std::min(rem, std::size_t(64));
-        const std::size_t got = drainApu(shadows_[c], discard, step);
-        if (got == 0) break;  // Defensive: never spin on a dry APU.
-        rem -= got;
-      }
-      continue;
-    }
-    const std::size_t got = drainApu(shadows_[c], out, frames);
+    const std::size_t got = readStem(c, out, frames, /*accumulate=*/false);
     if (got < frames) {
       std::memset(out + got, 0, (frames - got) * sizeof(float));
     }

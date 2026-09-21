@@ -2,17 +2,21 @@
 //
 // `GbApuDevice` extends `PsgDevice` (Tier-2C) with Shay Green's Gb_Snd_Emu
 // (Gb_Apu + Stereo_Buffer — the same engine classes `Basic_Gb_Apu` wraps):
-//   - master APU instance (full mix) + 4 shadow APUs for isolated
-//     per-channel rendering (0: Pulse1, 1: Pulse2, 2: Wave, 3: Noise),
+//   - ONE Gb_Apu whose four oscillators (0: Pulse1, 1: Pulse2, 2: Wave,
+//     3: Noise) are routed to four per-oscillator Stereo_Buffers, so a single
+//     chip yields both the mixed sum and each channel's isolated stem
+//     (scopes) and per-channel mute/solo (skip that oscillator in the sum —
+//     mGBA's channel-disable mask). This matches audition.py: one APU, each
+//     register written exactly once.
 //   - Game Boy audio register decode (0xFF10-0xFF25 + wave RAM 0xFF30-0xFF3F):
 //     pulse duty (12.5/25/50/75%), frequency, volume, sweep; wave RAM
 //     (32 nibbles); noise LFSR 7/15-bit mode + polynomial divisor/shift,
 //   - lazy channel wake-up: a channel wakes on its first write/trigger;
 //     renderPerChannel() takes the fast escape on dormant channels.
 //
-// Writes are fanned out to the master APU always, and to the addressed
-// shadow APU when the register belongs to one channel. Global registers
-// (NR50/NR51/NR52) mirror to all initialized shadows.
+// Writes go to the single Gb_Apu once; the PsgDevice decode setters update
+// the decoded UI state only (applyRegister is a no-op — there is no shadow
+// fan-out to re-push).
 //
 // NOTE on Basic_Gb_Apu: the device does NOT hold `Basic_Gb_Apu` directly.
 // Gb_Snd_Emu 0.1.4's `Blip_Buffer::set_sample_rate(rate)` default path
@@ -113,8 +117,6 @@ class GbApuDevice : public PsgDevice {
  private:
   static int channelForAddr(std::uint16_t addr);
   static bool isGlobalAddr(std::uint16_t addr);
-  void ensureShadow(int ch);
-  void pushToApu(GbVoiceApu* apu, std::uint16_t addr, std::uint8_t val);
   void decodeAndTrack(std::uint16_t addr, std::uint8_t val);
   void decodePulse(int ch, std::uint16_t addr);
   void decodeWave(std::uint16_t addr);
@@ -134,23 +136,20 @@ class GbApuDevice : public PsgDevice {
   // ChannelState. UI thread (snapshot()/setMute()/setSolo()); the audio
   // callback only reads. No re-snapshot from the render path.
   void refreshAudibleCache() const;
-  // Drains one APU frame into mono floats; returns frames written.
-  std::size_t drainApu(GbVoiceApu* apu, float* out, std::size_t max_frames);
+  // Reads one oscillator stem into mono floats, synthesizing a frame when the
+  // buffers run dry; accumulates into `out` when `accumulate` is set.
+  std::size_t readStem(int ch, float* out, std::size_t frames, bool accumulate);
 
   long sample_rate_;
   bool inited_ = false;
   // Register shadow for 0xFF10-0xFF3F (0x30 bytes).
   std::array<std::uint8_t, 0x30> regs_{};
-  GbVoiceApu* master_ = nullptr;
-  GbVoiceApu* shadows_[kChannels] = {nullptr, nullptr, nullptr, nullptr};
-  std::array<bool, kChannels> shadow_init_{};
+  GbVoiceApu* apu_ = nullptr;
 
   // Realtime render scratch, preallocated at init() so the audio callback
-  // never allocates: `tmp_scratch_` is the muted/soloed mix staging buffer
-  // (render()) and `discard_scratch_` the drain-only sink used to keep
-  // gates/audible-but-replacing shadows clocked.
+  // never allocates: `tmp_scratch_` stages each oscillator stem before it is
+  // summed into the mix (and tapped into the scope ring).
   std::vector<float> tmp_scratch_;
-  std::vector<float> discard_scratch_;
 
   // Lock-free per-channel gate cache (see channelAudible/refreshAudibleCache).
   // `mutable` so the const UI-thread snapshot() can refresh it.
