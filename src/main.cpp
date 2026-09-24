@@ -116,6 +116,17 @@ audio_dbg::SimState buildSimState(const audio_dbg::SessionEngine& engine) {
   return sim;
 }
 
+// Maps the device tab to the MIDI baseline target whose program numbers that
+// device speaks: GM tab -> gm, GB-APU tab -> gb, everything else -> mt32.
+// A device fed another target's programs mislabels (and mistunes) every
+// channel — e.g. MT-32 90/88 ("Trombone 1"/"Trumpet 1") on the GM device
+// read as "Pad 3 (polysynth)"/"Pad 1 (new age)".
+const char* baselineTargetForDeviceTab(int device_tab) {
+  if (device_tab == 3) return "gm";
+  if (device_tab == 1) return "gb";
+  return "mt32";
+}
+
 // Stage 6.5: loads the selected track's GB baseline into the engine (silent
 // no-op when the repo/midi file is unavailable).
 // Stops the engine, replaces the event stream, sizes total_frames past the
@@ -145,7 +156,15 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   audio_dbg::MidiFileData midi =
       enh_mgr.parseMidiFile(enh_mgr.midiPathFor(info->header_label, target));
   std::vector<audio_dbg::SimNoteEvent> base = std::move(midi.notes);
-  if (base.empty()) return;
+  if (base.empty()) {
+    // Loud, not silent: the engine keeps the previous target's events, so a
+    // missing baseline leaves the wrong program numbers on this device (the
+    // GM-tab "Pad 3 / Pad 1 instead of Trombone / Trumpet" report was a
+    // missing gm .mid leaving mt32 programs behind).
+    std::fprintf(stderr, "loadTrackBaseline: no baseline for %s target %s\n",
+                 info->header_label.c_str(), target);
+    return;
+  }
   // Embedded SysEx retained by the SMF parser reaches the synth too, before
   // setEvents()/syncDeviceState() replays the frame-0 Program Changes that
   // latch Patch Memory.
@@ -600,7 +619,7 @@ int main(int argc, char** argv) {
           engine.setEnhancementEvents({});
         } else {
           std::vector<audio_dbg::SimNoteEvent> compiled =
-              enh_mgr.compileEnhancement(song, "mt32");
+              enh_mgr.compileEnhancement(song, baselineTargetForDeviceTab(device_tab));
           engine.setEnhancementEvents(std::move(compiled));
         }
       }
@@ -810,9 +829,8 @@ int main(int argc, char** argv) {
     if (track_index != last_loaded_track && track_index >= 0 &&
         track_index < static_cast<int>(track_names.size())) {
       mixer.lock();
-      // GB-APU tab loads the gb baseline (raw drum instrument ids, no
-      // enhancement tracks); GM tab loads gm; everything else loads mt32.
-      const char* target = (device_tab == 3) ? "gm" : (device_tab == 1) ? "gb" : "mt32";
+      // Baseline target follows the active device tab (gb/gm/mt32).
+      const char* target = baselineTargetForDeviceTab(device_tab);
       loadTrackBaseline(engine, enh_mgr, catalog,
                         track_names[static_cast<std::size_t>(track_index)].c_str(),
                         target, &mt32_dev);
@@ -841,9 +859,8 @@ int main(int argc, char** argv) {
             engine.setActiveDevice(devices[i]);
             clock_shim.setInner(devices[i], device_rates[i]);
             mixer.setDevice(&clock_shim, device_rates[i]);
-            // GB-APU tab loads the gb baseline (raw drum instrument ids, no
-            // enhancement tracks); GM tab loads gm; everything else loads mt32.
-            const char* target = (device_tab == 3) ? "gm" : (device_tab == 1) ? "gb" : "mt32";
+            // Baseline target follows the active device tab (gb/gm/mt32).
+            const char* target = baselineTargetForDeviceTab(device_tab);
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
                                 track_names[static_cast<std::size_t>(track_index)].c_str(),
