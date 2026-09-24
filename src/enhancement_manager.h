@@ -35,10 +35,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
 #include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "devices/opl3_device.h"
 
 #include "session_engine.h"
 
@@ -278,6 +281,15 @@ class EnhancementManager {
   // Empty when the file is absent, fails lint, or python3 is unavailable.
   std::vector<SimNoteEvent> compileEnhancement(
       const std::string& song, const std::string& target = "mt32") const;
+  // Authored OPL voices from the last compileEnhancement() call (--target
+  // opl3 emits OPLVOICE lines): MIDI channel -> tier-1 VoicePatch. Cleared
+  // on every call, so a song without enhancement (or a failed compile)
+  // never serves the previous song's voices. The OPL3 device applies them
+  // per note-on; every other device ignores this map.
+  const std::map<std::uint8_t, Opl3Device::VoicePatch>& oplVoicePatches()
+      const {
+    return opl_voices_;
+  }
   // Native SMF type-0/1 parse: note-ons become on/off pairs with exact
   // frame timings. Empty on any parse failure. When
   // drop_enhancement_tracks is set, tracks named "enh ..." (the baked
@@ -318,6 +330,10 @@ class EnhancementManager {
   std::string revisions_dir_;
   std::string repo_root_;
   std::string watched_song_;
+  // Authored OPL voices from the last compileEnhancement() call. Mutable:
+  // compileEnhancement() is const (like the rest of the compiler surface)
+  // but refreshes this map as a side effect; oplVoicePatches() reads it.
+  mutable std::map<std::uint8_t, Opl3Device::VoicePatch> opl_voices_;
   // Cached watcher state: whether the file existed + its last mtime.
   bool watch_have_stamp_ = false;
   bool watch_existed_ = false;

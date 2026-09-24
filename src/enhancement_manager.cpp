@@ -573,6 +573,7 @@ std::pair<bool, std::string> EnhancementManager::loadYamlFile(
 std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
     const std::string& song, const std::string& target) const {
   std::vector<SimNoteEvent> out;
+  opl_voices_.clear();
   if (repo_root_.empty()) return out;
   fs::path bridge = fs::path(repo_root_) / "dos_port" / "tools" /
                     "dos-gb-audio-dbg" / "src" / "enhancement_dump.py";
@@ -638,6 +639,27 @@ std::vector<SimNoteEvent> EnhancementManager::compileEnhancement(
       off.duration_frames = 0;
       off.is_note_on = false;
       out.push_back(off);
+    } else if (kind == "OPLVOICE") {
+      // Authored tier-1 FM voice (--target opl3 only): MIDI channel,
+      // channel volume, C0 pan bits, then the 11 raw OPL register bytes
+      // in gen_opl_patches.py PATCHES order.
+      int mc = -1, vol = -1, pan = -1, b[11] = {0};
+      ls >> mc >> vol >> pan;
+      for (int i = 0; i < 11; ++i) ls >> b[i];
+      bool ok = !ls.fail() && mc >= 0 && mc < 16;
+      for (int i = 0; ok && i < 11; ++i) ok = (b[i] >= 0 && b[i] <= 255);
+      if (ok) {
+        Opl3Device::VoicePatch patch;
+        for (int i = 0; i < 11; ++i) {
+          patch.reg[i] = static_cast<std::uint8_t>(b[i]);
+        }
+        patch.volume =
+            static_cast<std::uint8_t>(std::min(127, std::max(0, vol)));
+        const int pan_bits = pan & 0x30;
+        patch.pan =
+            static_cast<std::uint8_t>(pan_bits != 0 ? pan_bits : 0x30);
+        opl_voices_[static_cast<std::uint8_t>(mc)] = patch;
+      }
     } else if (kind == "END") {
       saw_end = true;
     }

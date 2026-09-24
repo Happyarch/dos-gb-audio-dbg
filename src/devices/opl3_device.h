@@ -59,6 +59,26 @@ class Opl3Device : public FmDevice {
   void render(float* buf, std::size_t frames) override;
   void renderPerChannel(float** bufs, std::size_t frames) override;
 
+  // --- Authored FM voices (tier-1 enhancement) ---
+  // One VoicePatch per MIDI channel, from the live bridge (OPLVOICE lines):
+  // the 11 raw OPL register bytes in gen_opl_patches.py PATCHES order
+  // (m20 m40 m60 m80 mE0 c20 c40 c60 c80 cE0 C0), the channel volume
+  // (0-127) and the C0 pan bits. Applied on every note-on of a patched
+  // channel (mirroring audition/opl_renderer.py load_patch + key_on);
+  // channels without a patch keep the generic default voice. The map
+  // survives reset() (configuration, rewritten per note-on); track loads
+  // refresh it via clearVoicePatches()/setVoicePatch(). Clearing also
+  // releases each configured voice back to unconfigured (C0 zeroed) so a
+  // later note-on reinstalls the default voice instead of replaying a
+  // stale patch while silent.
+  struct VoicePatch {
+    std::uint8_t reg[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    std::uint8_t volume = 127;
+    std::uint8_t pan = 0x30;
+  };
+  void setVoicePatch(int midi_ch, const VoicePatch& patch);
+  void clearVoicePatches();
+
   // --- Raw OPL register write (banked 0x000-0x1F5) ---
   // Updates the shadow matrix, forwards to main + shadow chips, and decodes
   // operator/frequency/key state into the FmDevice base (waking the voice).
@@ -81,6 +101,7 @@ class Opl3Device : public FmDevice {
 
  private:
   // Voice/slot helpers.
+  void applyVoicePatch(int voice, int midi_ch, int velocity);
   static bool regInBank(std::uint16_t reg, int* bank, std::uint16_t* off);
   static int voiceLocalFromSlot(std::uint8_t slot, bool* is_carrier);
   int slotVoice(std::uint8_t slot, int bank, bool* is_carrier) const;
@@ -101,6 +122,8 @@ class Opl3Device : public FmDevice {
   opl3_chip* main_chip_ = nullptr;
   opl3_chip* shadows_ = nullptr;  // Array of 18, lazy Reset().
   std::array<bool, kVoices> shadow_init_{};
+  std::array<VoicePatch, 16> chan_patch_{};
+  std::array<bool, 16> chan_patch_set_{};
 };
 
 }  // namespace audio_dbg

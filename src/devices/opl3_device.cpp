@@ -446,6 +446,59 @@ void Opl3Device::applyKeyOff(int voice) {
   }
 }
 
+void Opl3Device::setVoicePatch(int midi_ch, const VoicePatch& patch) {
+  if (midi_ch < 0 || midi_ch >= 16) return;
+  chan_patch_[static_cast<std::size_t>(midi_ch)] = patch;
+  chan_patch_set_[static_cast<std::size_t>(midi_ch)] = true;
+}
+
+void Opl3Device::clearVoicePatches() {
+  for (int ch = 0; ch < 16; ++ch) {
+    if (!chan_patch_set_[static_cast<std::size_t>(ch)]) continue;
+    chan_patch_set_[static_cast<std::size_t>(ch)] = false;
+    if (!inited_) continue;
+    // Release the voice back to "unconfigured" so its next note-on
+    // reinstalls the generic default voice (the readReg(C0)==0 rule in
+    // handleCommand) instead of replaying this now-stale patch while
+    // silent. The default block rewrites every operator reg before key-on.
+    const int voice = ch % kVoices;
+    const std::uint16_t base = (voice / 9) == 1 ? 0x100 : 0x000;
+    writeReg(base + 0xC0 + static_cast<std::uint16_t>(voice % 9), 0x00);
+  }
+}
+
+// Writes an authored tier-1 voice to the chip (mirrors
+// audition/opl_renderer.py load_patch + the key_on carrier-TL step):
+// the 11 raw patch bytes, then the carrier total level for this note's
+// velocity under the channel volume (carrier_level: base_tl +
+// (127 - vel*volume/127) / 8, KSL bits preserved).
+void Opl3Device::applyVoicePatch(int voice, int midi_ch, int velocity) {
+  const VoicePatch& p = chan_patch_[static_cast<std::size_t>(midi_ch)];
+  const std::uint16_t base = (voice / 9) == 1 ? 0x100 : 0x000;
+  const int v_local = voice % 9;
+  const std::uint8_t mod =
+      kModSlots[static_cast<std::size_t>(v_local)];
+  const std::uint8_t car = static_cast<std::uint8_t>(mod + 3);
+  writeReg(base + 0x20 + mod, p.reg[0]);
+  writeReg(base + 0x40 + mod, p.reg[1]);
+  writeReg(base + 0x60 + mod, p.reg[2]);
+  writeReg(base + 0x80 + mod, p.reg[3]);
+  writeReg(base + 0xE0 + mod, p.reg[4]);
+  writeReg(base + 0x20 + car, p.reg[5]);
+  writeReg(base + 0x60 + car, p.reg[7]);
+  writeReg(base + 0x80 + car, p.reg[8]);
+  writeReg(base + 0xE0 + car, p.reg[9]);
+  int eff = velocity * static_cast<int>(p.volume) / 127;
+  if (eff < 0) eff = 0;
+  if (eff > 127) eff = 127;
+  int tl = (p.reg[6] & 0x3F) + (127 - eff) / 8;
+  if (tl > 63) tl = 63;
+  writeReg(base + 0x40 + car,
+           static_cast<std::uint8_t>((p.reg[6] & 0xC0) | tl));
+  writeReg(base + 0xC0 + static_cast<std::uint16_t>(v_local),
+           static_cast<std::uint8_t>((p.reg[10] & 0x0F) | p.pan));
+}
+
 void Opl3Device::handleCommand(std::uint8_t opcode,
                                const std::uint8_t* payload, std::size_t len) {
   if (payload == nullptr || len == 0 || !inited_) return;
@@ -476,10 +529,16 @@ void Opl3Device::handleCommand(std::uint8_t opcode,
         break;
       }
     }
-    // Set default operator patch if never configured on chip.
-    const int v_local = voice % 9;
-    const std::uint16_t c_base = (voice / 9) == 1 ? 0x100 : 0x000;
-    if (readReg(c_base + 0xC0 + static_cast<std::size_t>(v_local)) == 0) {
+    // Authored tier-1 voice when the channel carries one (setVoicePatch
+    // from the live bridge); otherwise the generic default voice below.
+    if (ch >= 0 && ch < 16 &&
+        chan_patch_set_[static_cast<std::size_t>(ch)]) {
+      applyVoicePatch(voice, ch, vel);
+    } else {
+      // Set default operator patch if never configured on chip.
+      const int v_local = voice % 9;
+      const std::uint16_t c_base = (voice / 9) == 1 ? 0x100 : 0x000;
+      if (readReg(c_base + 0xC0 + static_cast<std::size_t>(v_local)) == 0) {
       FmOperatorParams mod_p;
       mod_p.mult = 1; mod_p.tl = 0x1A; mod_p.ar = 15; mod_p.dr = 0; mod_p.sl = 0; mod_p.rr = 7;
       mod_p.egt = true;
@@ -490,6 +549,7 @@ void Opl3Device::handleCommand(std::uint8_t opcode,
       writeOperator(voice, true, car_p);
       writeFeedback(voice, 1, 0);
       writeReg(c_base + 0xC0 + static_cast<std::size_t>(v_local), 0x32);
+      }
     }
     writeFrequency(voice, fnum, block);
     voiceKeyOn(voice);

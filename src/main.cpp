@@ -138,6 +138,21 @@ const char* enhancementTargetForDeviceTab(int device_tab) {
   return "mt32";
 }
 
+// Pushes the live bridge's authored OPL voices (if any) onto the OPL3
+// device. Called after every enhancement (re)compile; a no-op unless the
+// OPL3 device is active. Always clear-then-set, so a song without
+// enhancement leaves no stale voices behind.
+void applyOplVoicePatches(audio_dbg::SessionEngine& engine,
+                          audio_dbg::EnhancementManager& enh_mgr) {
+  audio_dbg::Opl3Device* opl =
+      dynamic_cast<audio_dbg::Opl3Device*>(engine.activeDevice());
+  if (opl == nullptr) return;
+  opl->clearVoicePatches();
+  for (const auto& kv : enh_mgr.oplVoicePatches()) {
+    opl->setVoicePatch(kv.first, kv.second);
+  }
+}
+
 // Stage 6.5: loads the selected track's GB baseline into the engine (silent
 // no-op when the repo/midi file is unavailable).
 // Stops the engine, replaces the event stream, sizes total_frames past the
@@ -203,6 +218,7 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   std::vector<audio_dbg::SimNoteEvent> enh =
       enh_mgr.compileEnhancement(info->header_label, enh_target);
   engine.setEnhancementEvents(std::move(enh));
+  applyOplVoicePatches(engine, enh_mgr);
 }
 
 // --- Audio-clock tick shim (transport clock rework) -------------------------
@@ -637,6 +653,7 @@ int main(int argc, char** argv) {
               enh_mgr.compileEnhancement(song, enhancementTargetForDeviceTab(device_tab));
           engine.setEnhancementEvents(std::move(compiled));
         }
+        applyOplVoicePatches(engine, enh_mgr);
       }
     }
     if (mixer.isDisabled()) {

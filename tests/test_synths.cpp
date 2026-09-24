@@ -238,6 +238,46 @@ int main() {
     std::printf("PASS opl3 mute gating\n");
   }
 
+  // --- OPL3: authored tier-1 voice patch --------------------------------
+  // sub_bass bytes pinned from gen_opl_patches.py (the bridge is the only
+  // runtime source; the device takes raw bytes so the table lives once).
+  {
+    Opl3Device dev;
+    CHECK(dev.init());
+    Opl3Device::VoicePatch sub;
+    const std::uint8_t sub_reg[11] = {0x21, 0x3F, 0xF0, 0x07, 0x00,
+                                      0x21, 0x00, 0xF0, 0x07, 0x00, 0x00};
+    for (int i = 0; i < 11; ++i) sub.reg[i] = sub_reg[i];
+    sub.volume = 60;
+    sub.pan = 0x10;
+    dev.setVoicePatch(4, sub);
+    dev.setVoicePatch(99, sub);  // Out of range: ignored, no crash.
+    const std::uint8_t on[3] = {4, 45, 100};
+    dev.handleCommand(0x90, on, 3);
+    // Voice 4 (bank 0): mod slot 0x09, carrier 0x0C.
+    CHECK(dev.readReg(0x20 + 0x09) == 0x21);
+    CHECK(dev.readReg(0x40 + 0x09) == 0x3F);
+    CHECK(dev.readReg(0x60 + 0x0C) == 0xF0);
+    CHECK(dev.readReg(0xE0 + 0x0C) == 0x00);
+    // Carrier TL: base 0 + (127 - 100*60/127)/8 = 10, KSL preserved.
+    CHECK(dev.readReg(0x40 + 0x0C) == 0x0A);
+    // C0: patch feedback nibble (0) | pan.
+    CHECK(dev.readReg(0xC0 + 0x04) == 0x10);
+    std::vector<float> buf(kFrames, 0.0f);
+    dev.render(buf.data(), kFrames);
+    CHECK(maxAbs(buf.data(), kFrames) > 1e-4f);
+    // Unpatched channel keeps the generic default voice (C0 0x32).
+    const std::uint8_t on1[3] = {1, 60, 100};
+    dev.handleCommand(0x90, on1, 3);
+    CHECK(dev.readReg(0xC0 + 0x01) == 0x32);
+    // Clearing releases the voice: next note-on reinstalls the default.
+    dev.clearVoicePatches();
+    dev.handleCommand(0x90, on, 3);
+    CHECK(dev.readReg(0xC0 + 0x04) == 0x32);
+    dev.shutdown();
+    std::printf("PASS opl3 authored voice patch\n");
+  }
+
   // --- GB-APU: fresh dormancy ------------------------------------------
   {
     GbApuDevice dev;

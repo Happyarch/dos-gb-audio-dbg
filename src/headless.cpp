@@ -220,6 +220,13 @@ int runHeadlessTrack(const CliOptions& opt, std::string* err,
   } else {
     engine.setEnhancementEnabled(false);
   }
+  // Authored tier-1 FM voices for the OPL3 device (no-op otherwise).
+  if (Opl3Device* opl = dynamic_cast<Opl3Device*>(dev.get())) {
+    opl->clearVoicePatches();
+    for (const auto& kv : enh_mgr.oplVoicePatches()) {
+      opl->setVoicePatch(kv.first, kv.second);
+    }
+  }
   engine.setTotalFrames(frames);
   engine.play();
 
