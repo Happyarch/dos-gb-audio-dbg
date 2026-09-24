@@ -515,6 +515,13 @@ int main(int argc, char** argv) {
 
   int device_tab = initial_tab;
   int request_tab_switch = initial_tab;
+  // Manual baseline refresh ([R] / top-bar button): re-renders
+  // assets/midi/<target>/<Song>.mid for the current track (overrides/ fold
+  // in at gb_to_midi render time; nothing re-renders them automatically)
+  // and forces the stage-6.5 reload below. Set from the event loop / top
+  // bar, consumed once per frame just before the 6.5 check.
+  bool request_baseline_refresh = false;
+  std::string baseline_refresh_status;
   engine.setActiveDevice(devices[device_tab]);
   // The engine dispatches to the real device; the mixer renders through the
   // shim, whose render() is the audio clock the ticks are paced from.
@@ -626,7 +633,11 @@ int main(int argc, char** argv) {
         } else if (!io.WantTextInput) {
           // Stage 6.4: transport shortcuts handled only when text input is not active
           audio_dbg::TransportKey tkey;
-          if (sdlToTransportKey(event.key.keysym.sym, &tkey)) {
+          if (event.key.keysym.sym == SDLK_r) {
+            // Manual baseline refresh (top-bar [R] button twin): handled
+            // below, just before the stage-6.5 reload check.
+            request_baseline_refresh = true;
+          } else if (sdlToTransportKey(event.key.keysym.sym, &tkey)) {
             mixer.lock();
             transport.handleKey(engine, &enh_mgr, tkey);
             mixer.unlock();
@@ -854,7 +865,49 @@ int main(int argc, char** argv) {
     }
     ImGui::SameLine();
     ImGui::Checkbox("[G] GB", &enhance_gb);
+    ImGui::SameLine();
+    // Manual baseline refresh twin of the [R] key: re-renders the current
+    // track's .mid files (picks up overrides/*.yaml edits) and reloads.
+    if (ImGui::Button("[R] Re-render")) {
+      request_baseline_refresh = true;
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Re-run gb_to_midi for this track (mt32+gm) and reload the\n"
+          "baseline. This is the ONLY path that picks up overrides/*.yaml\n"
+          "edits — without it the debugger keeps playing the stale .mid.");
+    }
+    if (!baseline_refresh_status.empty()) {
+      ImGui::SameLine();
+      ImGui::TextDisabled("%s", baseline_refresh_status.c_str());
+    }
     ImGui::End();
+
+    // Manual baseline refresh ([R] key / top-bar button): re-render the
+    // current track's assets/midi/<target> files (this is the ONLY path
+    // that picks up overrides/*.yaml edits — the .mid is otherwise stale
+    // and even a restart re-reads it), then force the stage-6.5 reload
+    // below by invalidating last_loaded_track. A failed render keeps the
+    // old baseline and reports here instead of loading a torn state.
+    if (request_baseline_refresh) {
+      request_baseline_refresh = false;
+      if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
+        const audio_dbg::SongInfo* info =
+            catalog.findTrack(track_names[static_cast<std::size_t>(track_index)].c_str());
+        std::string render_err;
+        if (info != nullptr && enh_mgr.renderBaseline(info->header_label, &render_err)) {
+          last_loaded_track = -1;
+          baseline_refresh_status = "re-rendered " + info->header_label;
+        } else {
+          baseline_refresh_status =
+              "RENDER FAILED: " + (render_err.empty() ? "unknown error" : render_err);
+          std::fprintf(stderr, "baseline refresh failed: %s\n",
+                       baseline_refresh_status.c_str());
+        }
+      } else {
+        baseline_refresh_status = "RENDER FAILED: no track selected";
+      }
+    }
 
     // Stage 6.5: (re)load the GB baseline when the track selection changes
     // (also runs once on the first frame for the default track).

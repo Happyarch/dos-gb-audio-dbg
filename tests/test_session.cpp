@@ -562,6 +562,30 @@ int main() {
     std::printf("PASS enhancement compilation\n");
   }
 
+  // --- renderBaseline(): re-render .mid baselines via gb_to_midi ----------
+  {
+#ifdef PKMN_TEST_REPO_ROOT
+    EnhancementManager mgr(PKMN_TEST_REPO_ROOT);
+#else
+    EnhancementManager mgr;
+#endif
+    // False cases first (no side effects): empty song, empty repo root.
+    std::string err;
+    CHECK(!mgr.renderBaseline("", &err));
+    CHECK(!err.empty());
+    EnhancementManager noroot("", "", "");
+    CHECK(!noroot.renderBaseline("Music_PalletTown", &err));
+    // True case: single-song render for both MIDI targets. Rewrites the
+    // (gitignored) assets/midi/<target>/Music_PalletTown.mid files.
+    CHECK(mgr.renderBaseline("Music_PalletTown", &err));
+    namespace fs2 = std::filesystem;
+    for (const char* t : {"mt32", "gm"}) {
+      CHECK(!mgr.midiPathFor("Music_PalletTown", t).empty());
+      CHECK(fs2::is_regular_file(mgr.midiPathFor("Music_PalletTown", t)));
+    }
+    std::printf("PASS baseline re-render\n");
+  }
+
   // --- Stage 5.5 (Part 5B): revisions + mtime watcher (temp dir) ------------
   {
     namespace fs = std::filesystem;

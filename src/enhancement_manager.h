@@ -306,6 +306,15 @@ class EnhancementManager {
       const std::string& song, const std::string& target = "mt32") const;
   std::string midiPathFor(const std::string& song,
                           const std::string& target = "mt32") const;
+  // Re-renders assets/midi/<target>/<Song>.mid for the mt32+gm targets via
+  // gb_to_midi.py --songs (the ONLY consumer of overrides/*.yaml: program
+  // changes, volumes, pans, and the drum map all bake in at render time).
+  // The gb target is skipped — it carries raw ids and never passes through
+  // overrides. True iff both renders exit 0; on failure err (when non-null)
+  // takes the renderer's last output line. No files are touched on failure
+  // (gb_to_midi writes only on success).
+  bool renderBaseline(const std::string& song,
+                      std::string* err = nullptr) const;
 
   // --- MT-32 custom-timbre bridge (delegates to enhancement_sysex.py) ------
   // The Timbre Memory upload blob from tools/audio/mt32/timbres.yaml via

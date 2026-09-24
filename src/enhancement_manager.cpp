@@ -808,6 +808,58 @@ std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
   return parseMidiFile(path, true).notes;
 }
 
+bool EnhancementManager::renderBaseline(const std::string& song,
+                                       std::string* err) const {
+  static const char* const kTargets[2] = {"mt32", "gm"};
+  if (song.empty() || repo_root_.empty()) {
+    if (err != nullptr) *err = "no song (or no repo root)";
+    return false;
+  }
+  std::error_code ec;
+  const fs::path script = fs::path(repo_root_) / "dos_port" / "tools" /
+                          "audio" / "gb_to_midi.py";
+  if (!fs::is_regular_file(script, ec)) {
+    if (err != nullptr) *err = "gb_to_midi.py not found";
+    return false;
+  }
+  std::string last_line;
+  for (const char* target : kTargets) {
+    const std::string cmd =
+        "python3 " + sysex_bridge::shellQuote(script.string()) +
+        " --target " + target + " --songs " + sysex_bridge::shellQuote(song) +
+        " 2>&1";
+    FILE* pipe = ::popen(cmd.c_str(), "r");
+    if (pipe == nullptr) {
+      if (err != nullptr) *err = "popen failed";
+      return false;
+    }
+    char buf[512];
+    std::string carry;
+    while (std::fgets(buf, sizeof(buf), pipe) != nullptr) {
+      carry += buf;
+      std::size_t nl = 0;
+      while ((nl = carry.find('\n')) != std::string::npos) {
+        last_line = carry.substr(0, nl);
+        carry.erase(0, nl + 1);
+      }
+    }
+    if (!carry.empty()) last_line = carry;
+    const int status = ::pclose(pipe);
+    // A failing render must not invalidate the current baseline: gb_to_midi
+    // builds each song fully in memory and only then writes its .mid, so a
+    // song that errors keeps its previous file. Still, report and stop —
+    // the caller keeps the old baseline on false.
+    if (status != 0) {
+      if (err != nullptr) {
+        *err = std::string(target) + ": " +
+               (last_line.empty() ? "non-zero exit" : last_line);
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
 SysExMessages EnhancementManager::loadTimbreBank() const {
   SysExMessages timbres;
   SongTimbreSysex unused;

@@ -131,11 +131,18 @@ int main() {
   }
 
   // --- Mt32Tab: programName() timbre resolution --------------------------
+  // Factory bank order (mt32_presets.py MT32_FACTORY) — NOT the GM list.
   {
     Mt32Tab tab;
-    CHECK(std::strcmp(tab.programName(0), "AcouPiano1") == 0);
+    CHECK(std::strcmp(tab.programName(0), "Acou Piano 1") == 0);
     CHECK(std::strcmp(tab.programName(7), "Honkytonk") == 0);
-    CHECK(std::strcmp(tab.programName(8), "Organ 1") == 0);
+    CHECK(std::strcmp(tab.programName(8), "Elec Org 1") == 0);
+    CHECK(std::strcmp(tab.programName(38), "Warm Bell") == 0);
+    CHECK(std::strcmp(tab.programName(47), "Square Wave") == 0);
+    CHECK(std::strcmp(tab.programName(51), "Pizzicato") == 0);
+    CHECK(std::strcmp(tab.programName(57), "Harp 1") == 0);
+    CHECK(std::strcmp(tab.programName(80), "Sax 3") == 0);
+    CHECK(std::strcmp(tab.programName(105), "Koto") == 0);
     // Clamp behaviour matches Mt32Device::mt32TimbreName.
     CHECK(tab.programName(-5) == tab.programName(0));
     CHECK(tab.programName(200) == tab.programName(127));
