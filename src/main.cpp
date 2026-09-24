@@ -557,6 +557,9 @@ int main(int argc, char** argv) {
     mt32_dev.setRepoRoot(root);
     enh_mgr.setEnhanceDir(enhancements);
     enh_mgr.setRevisionsDir(root.empty() ? "" : root + "/dos_port/tools/audio/.revisions");
+    // The overrides watcher tracks per-song files under this dir (defaults
+    // to dos_port/tools/audio/overrides; --overrides-dir / config wins).
+    enh_mgr.setOverridesDir(overrides);
 
     track_names.clear();
     if (!catalog.empty()) {
@@ -874,8 +877,9 @@ int main(int argc, char** argv) {
     if (ImGui::IsItemHovered()) {
       ImGui::SetTooltip(
           "Re-run gb_to_midi for this track (mt32+gm) and reload the\n"
-          "baseline. This is the ONLY path that picks up overrides/*.yaml\n"
-          "edits — without it the debugger keeps playing the stale .mid.");
+          "baseline. Overrides/*.yaml edits also trigger this automatically\n"
+          "on save; the button is the manual twin for when the watcher\n"
+          "misses (or the render failed and you fixed the YAML).");
     }
     if (!baseline_refresh_status.empty()) {
       ImGui::SameLine();
@@ -883,13 +887,16 @@ int main(int argc, char** argv) {
     }
     ImGui::End();
 
-    // Manual baseline refresh ([R] key / top-bar button): re-render the
-    // current track's assets/midi/<target> files (this is the ONLY path
-    // that picks up overrides/*.yaml edits — the .mid is otherwise stale
-    // and even a restart re-reads it), then force the stage-6.5 reload
-    // below by invalidating last_loaded_track. A failed render keeps the
-    // old baseline and reports here instead of loading a torn state.
-    if (request_baseline_refresh) {
+    // Baseline refresh, manual ([R] key / top-bar button) or automatic (the
+    // watched song's overrides/*.yaml changed on disk — the audition.py
+    // parity path): re-render the current track's assets/midi/<target>
+    // files (this is the ONLY path that picks up overrides/*.yaml edits —
+    // the .mid is otherwise stale and even a restart re-reads it), then
+    // force the stage-6.5 reload below by invalidating last_loaded_track.
+    // A failed render keeps the old baseline and reports here instead of
+    // loading a torn state.
+    if (request_baseline_refresh || enh_mgr.pollOverrideChanges()) {
+      const bool manual = request_baseline_refresh;
       request_baseline_refresh = false;
       if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
         const audio_dbg::SongInfo* info =
@@ -897,7 +904,8 @@ int main(int argc, char** argv) {
         std::string render_err;
         if (info != nullptr && enh_mgr.renderBaseline(info->header_label, &render_err)) {
           last_loaded_track = -1;
-          baseline_refresh_status = "re-rendered " + info->header_label;
+          baseline_refresh_status =
+              (manual ? "re-rendered " : "auto re-rendered ") + info->header_label;
         } else {
           baseline_refresh_status =
               "RENDER FAILED: " + (render_err.empty() ? "unknown error" : render_err);

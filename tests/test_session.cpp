@@ -603,6 +603,7 @@ int main() {
     }
     m.watchSong("Music_TestSong");
     CHECK(!m.pollForChanges());  // Cached at watch time: no change.
+    CHECK(!m.pollOverrideChanges());  // No overrides dir set: nothing tracked.
     // Deterministic mtime bump (no sleep: filesystems may tick coarsely).
     fs::last_write_time(yaml, fs::last_write_time(yaml) +
                                    std::chrono::seconds(2),
@@ -644,6 +645,43 @@ int main() {
     CHECK(!m.pollForChanges());  // Revert refreshed the watch cache.
     fs::remove_all(tmp, ec);
     std::printf("PASS revisions + watcher\n");
+  }
+
+  // --- Overrides watcher (temp dir): mirrors the enhancements poll --------
+  {
+    namespace fs = std::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / "pkmn-viewer-ovr-test";
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp / "ovr", ec);
+    EnhancementManager m;
+    m.setEnhanceDir((tmp / "enh").string());
+    m.setOverridesDir((tmp / "ovr").string());
+    // No overrides file yet: watch stamps the absence, polls stay quiet.
+    m.watchSong("Music_TestSong");
+    CHECK(m.watchedOverridesPath() ==
+          (tmp / "ovr" / "Music_TestSong.yaml").string());
+    CHECK(!m.pollOverrideChanges());
+    // File appears -> one report, then quiet.
+    {
+      std::ofstream f(tmp / "ovr" / "Music_TestSong.yaml",
+                      std::ios::binary | std::ios::trunc);
+      f << "channels: {}";
+    }
+    CHECK(m.pollOverrideChanges());
+    CHECK(!m.pollOverrideChanges());
+    // Content mtime flip -> one report, then quiet.
+    const fs::path ovr = tmp / "ovr" / "Music_TestSong.yaml";
+    fs::last_write_time(ovr, fs::last_write_time(ovr) + std::chrono::seconds(2),
+                        ec);
+    CHECK(!ec);
+    CHECK(m.pollOverrideChanges());
+    CHECK(!m.pollOverrideChanges());
+    // Retargeting re-stamps: no phantom report for the new song's absence.
+    m.watchSong("Music_OtherSong");
+    CHECK(!m.pollOverrideChanges());
+    fs::remove_all(tmp, ec);
+    std::printf("PASS overrides watcher\n");
   }
 
   // --- Stage 5.5 (Part 5B): position-locked A/B slot switching --------------

@@ -5,7 +5,10 @@
 // enhancement pipeline (`yaml_lint.py` resolve + `assets/midi/` baseline):
 //   - Watch: monitors `dos_port/tools/audio/enhancements/<Song>.yaml` via
 //     `std::filesystem::last_write_time`; `pollForChanges()` reports once
-//     per on-disk change and refreshes its cache.
+//     per on-disk change and refreshes its cache. The watched song's
+//     `overrides/<Song>.yaml` is tracked the same way (`pollOverrideChanges`
+//     drives the baseline re-render — overrides fold into assets/midi
+//     only at gb_to_midi time).
 //   - Revisions: snapshots under `dos_port/tools/audio/.revisions/<Song>/`
 //     named `{id:04d}_{YYYYmmdd_HHMMSS}_{note}.yaml`; `saveSnapshot()` skips
 //     the write when the content is byte-identical to the latest revision
@@ -242,19 +245,29 @@ class EnhancementManager {
   void setEnhanceDir(const std::string& dir) { enhance_dir_ = dir; }
   void setRevisionsDir(const std::string& dir) { revisions_dir_ = dir; }
   void setRepoRoot(const std::string& root) { repo_root_ = root; }
+  // Overrides dir for the watcher (defaults under dos_port/tools/audio/;
+  // main.cpp re-points it at the resolved --overrides-dir / config value).
+  void setOverridesDir(const std::string& dir) { overrides_dir_ = dir; }
   const std::string& enhanceDir() const { return enhance_dir_; }
   const std::string& revisionsDir() const { return revisions_dir_; }
   const std::string& repoRoot() const { return repo_root_; }
+  const std::string& overridesDir() const { return overrides_dir_; }
 
   // --- Watcher ---
-  // Starts (or re-targets) mtime monitoring of <Song>.yaml. Caches the
-  // current state, so the first poll after watchSong() reports no change.
+  // Starts (or re-targets) mtime monitoring of <Song>.yaml (enhancements)
+  // AND overrides/<Song>.yaml. Caches the current state, so the first poll
+  // after watchSong() reports no change on either file.
   void watchSong(const std::string& song);
   const std::string& watchedSong() const { return watched_song_; }
   std::string watchedPath() const;
+  std::string watchedOverridesPath() const;
   // True exactly once per on-disk change (content mtime flip, or the file
   // appearing/disappearing); refreshes the cache as a side effect.
   bool pollForChanges();
+  // Same, for the watched song's overrides file (drives the baseline
+  // re-render: overrides fold into assets/midi only at gb_to_midi time).
+  // False when no overrides dir is configured.
+  bool pollOverrideChanges();
 
   // --- Revisions (revisions.py parity) ---
   // Writes {id:04d}_{ts}_{note}.yaml unless `content` is byte-identical to
@@ -333,11 +346,14 @@ class EnhancementManager {
  private:
   std::string revisionDirFor(const std::string& song) const;
   std::string yamlPathFor(const std::string& song) const;
+  std::string overridesPathFor(const std::string& song) const;
   void refreshWatchCache();
+  void refreshOverrideWatchCache();
 
   std::string enhance_dir_;
   std::string revisions_dir_;
   std::string repo_root_;
+  std::string overrides_dir_;
   std::string watched_song_;
   // Authored OPL voices from the last compileEnhancement() call. Mutable:
   // compileEnhancement() is const (like the rest of the compiler surface)
@@ -347,6 +363,10 @@ class EnhancementManager {
   bool watch_have_stamp_ = false;
   bool watch_existed_ = false;
   std::uint64_t watch_mtime_ns_ = 0;
+  // Same, for the watched song's overrides file.
+  bool ov_have_stamp_ = false;
+  bool ov_existed_ = false;
+  std::uint64_t ov_mtime_ns_ = 0;
 };
 
 }  // namespace audio_dbg

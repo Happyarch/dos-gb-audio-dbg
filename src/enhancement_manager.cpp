@@ -393,6 +393,9 @@ EnhancementManager::EnhancementManager(const std::string& repo_root)
     revisions_dir_ = (fs::path(repo_root_) / "dos_port" / "tools" / "audio" /
                       ".revisions")
                          .string();
+    overrides_dir_ = (fs::path(repo_root_) / "dos_port" / "tools" / "audio" /
+                      "overrides")
+                         .string();
   }
 }
 
@@ -414,6 +417,7 @@ std::string EnhancementManager::yamlPathFor(const std::string& song) const {
 void EnhancementManager::watchSong(const std::string& song) {
   watched_song_ = song;
   refreshWatchCache();
+  refreshOverrideWatchCache();
 }
 
 std::string EnhancementManager::watchedPath() const {
@@ -461,6 +465,63 @@ bool EnhancementManager::pollForChanges() {
   watch_have_stamp_ = true;
   watch_existed_ = existed;
   watch_mtime_ns_ = mtime_ns;
+  return changed;
+}
+
+std::string EnhancementManager::overridesPathFor(
+    const std::string& song) const {
+  return (fs::path(overrides_dir_) / (song + ".yaml")).string();
+}
+
+std::string EnhancementManager::watchedOverridesPath() const {
+  if (watched_song_.empty() || overrides_dir_.empty()) return "";
+  return overridesPathFor(watched_song_);
+}
+
+void EnhancementManager::refreshOverrideWatchCache() {
+  ov_have_stamp_ = true;
+  ov_existed_ = false;
+  ov_mtime_ns_ = 0;
+  if (watched_song_.empty() || overrides_dir_.empty()) return;
+  std::error_code ec;
+  fs::path p = overridesPathFor(watched_song_);
+  ov_existed_ = fs::is_regular_file(p, ec);
+  if (ov_existed_) {
+    auto t = fs::last_write_time(p, ec);
+    if (!ec) {
+      ov_mtime_ns_ =
+          static_cast<std::uint64_t>(t.time_since_epoch().count());
+    }
+  }
+}
+
+bool EnhancementManager::pollOverrideChanges() {
+  // No overrides dir configured (or no watched song): nothing to track.
+  // Unlike pollForChanges, an unstamped first poll reports NO change —
+  // watchSong() stamps both caches, and a re-render on every track switch
+  // would hitch the UI for no reason (the fresh loadTrackBaseline already
+  // plays the current .mid).
+  if (watched_song_.empty() || overrides_dir_.empty() || !ov_have_stamp_) {
+    return false;
+  }
+  std::error_code ec;
+  fs::path p = overridesPathFor(watched_song_);
+  const bool existed = fs::is_regular_file(p, ec);
+  std::uint64_t mtime_ns = 0;
+  if (existed) {
+    auto t = fs::last_write_time(p, ec);
+    if (!ec) {
+      mtime_ns = static_cast<std::uint64_t>(t.time_since_epoch().count());
+    }
+  }
+  bool changed = false;
+  if (existed != ov_existed_) {
+    changed = true;
+  } else if (existed && mtime_ns != ov_mtime_ns_) {
+    changed = true;
+  }
+  ov_existed_ = existed;
+  ov_mtime_ns_ = mtime_ns;
   return changed;
 }
 
