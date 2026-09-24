@@ -10,3 +10,8 @@ third_party/
 # Test audio artifacts & logs
 *.wav
 *.audiolog
+
+# Runtime Python bridge bytecode (enhancement_dump.py etc. run on every
+# track load/hot-reload; never commit the cache).
+__pycache__/
+*.pyc
