@@ -9,6 +9,9 @@
 //      stash round-trip, no-stash fallback.
 //   5. Shortcuts: Space/Home/Left/Right/E/Tab handling, [/] revision stepping
 //      (null manager -> unhandled; temp-dir manager -> content-verified walk).
+//   6. Baseline loader: synthetic .mid with GB + baked "enh ..." tracks —
+//      whole-file parse keeps both layers, baseline parse drops the baked
+//      enhancement note but keeps the base note and loop markers.
 // Exits 0 with ALL PASS on success, 1 on any failure.
 
 #include <cmath>
@@ -502,6 +505,99 @@ int main() {
     CHECK(mgr.loadYamlFile("Music_TestSong").second == "rev-two");
     fs::remove_all(tmp, ec);
     std::printf("PASS revision stepping\n");
+  }
+
+  // --- 5e. Baseline loader drops baked enhancement tracks ------------------
+  // A type-1 .mid with a conductor track (loop markers), a "GB ch1" base
+  // track and an "enh ... tier2" track: the whole-file parse keeps both
+  // note layers (soundtrack export stays complete), while the baseline
+  // parse (drop_enhancement_tracks) keeps the base note and the loop
+  // markers but drops the baked enhancement note. Runtime enhancement is
+  // the live bridge's job alone (per-device tier target); without this
+  // every enhancement note sounds twice, and tier-2/3 leak onto OPL3.
+  {
+    namespace fs = std::filesystem;
+    const fs::path tmp = fs::temp_directory_path() / "pkmn-baseline-drop-test";
+    std::error_code ec;
+    fs::remove_all(tmp, ec);
+    fs::create_directories(tmp, ec);
+    const std::string path = (tmp / "t.mid").string();
+    // Minimal SMF type-1, division 60 (1 tick = 1 frame at tempo 1e6).
+    std::vector<std::uint8_t> bytes;
+    auto push = [&](std::initializer_list<std::uint8_t> xs) {
+      bytes.insert(bytes.end(), xs);
+    };
+    auto track = [&](const std::vector<std::uint8_t>& ev) {
+      push({'M', 'T', 'r', 'k'});
+      const auto n = ev.size();
+      push({0, 0, (std::uint8_t)(n >> 8), (std::uint8_t)(n & 0xFF)});
+      bytes.insert(bytes.end(), ev.begin(), ev.end());
+    };
+    auto name = [](const char* s) {
+      std::vector<std::uint8_t> ev = {0x00, 0xFF, 0x03};
+      std::string t(s);
+      ev.push_back((std::uint8_t)t.size());
+      for (char c : t) ev.push_back((std::uint8_t)c);
+      return ev;
+    };
+    push({'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 1, 0, 3, 0, 60});
+    // Conductor: tempo 1e6, name, loopStart at tick 0, loopEnd at tick 120.
+    {
+      std::vector<std::uint8_t> ev = {0x00, 0xFF, 0x51, 0x03,
+                                      0x0F, 0x42, 0x40};
+      auto n = name("T");
+      ev.insert(ev.end(), n.begin(), n.end());
+      const char* s = "loopStart";
+      ev.insert(ev.end(), {0x00, 0xFF, 0x06, 0x09});
+      for (int i = 0; s[i]; ++i) ev.push_back((std::uint8_t)s[i]);
+      const char* m = "loopEnd";
+      ev.push_back(120);  // delta 120 (< 128: single-byte VLQ).
+      ev.insert(ev.end(), {0xFF, 0x06, 0x07});
+      for (int i = 0; m[i]; ++i) ev.push_back((std::uint8_t)m[i]);
+      ev.insert(ev.end(), {0x00, 0xFF, 0x2F, 0x00});
+      track(ev);
+    }
+    // Base: "GB ch1", note 60 on ch1 tick 0, off tick 60.
+    {
+      auto ev = name("GB ch1");
+      ev.insert(ev.end(), {0x00, 0x90 | 1, 60, 100});
+      ev.insert(ev.end(), {60, 0x80 | 1, 60, 64});
+      ev.insert(ev.end(), {0x00, 0xFF, 0x2F, 0x00});
+      track(ev);
+    }
+    // Baked enhancement: "enh foo tier2", note 40 on ch6 tick 0, off tick 30.
+    {
+      auto ev = name("enh foo tier2");
+      ev.insert(ev.end(), {0x00, 0x90 | 6, 40, 90});
+      ev.insert(ev.end(), {30, 0x80 | 6, 40, 64});
+      ev.insert(ev.end(), {0x00, 0xFF, 0x2F, 0x00});
+      track(ev);
+    }
+    {
+      std::ofstream f(path, std::ios::binary);
+      f.write(reinterpret_cast<const char*>(bytes.data()),
+              (std::streamsize)bytes.size());
+    }
+    EnhancementManager mgr("");
+    auto whole = mgr.parseMidiFile(path);
+    auto base = mgr.parseMidiFile(path, true);
+    auto hasNote = [](const std::vector<audio_dbg::SimNoteEvent>& evs, int ch,
+                      int note) {
+      for (const auto& e : evs) {
+        if (e.is_note_on && e.type == audio_dbg::SimEventType::Note &&
+            e.channel == ch && e.note == note)
+          return true;
+      }
+      return false;
+    };
+    CHECK(hasNote(whole.notes, 1, 60));
+    CHECK(hasNote(whole.notes, 6, 40));
+    CHECK(whole.loop_end_frame == 120);
+    CHECK(hasNote(base.notes, 1, 60));
+    CHECK(!hasNote(base.notes, 6, 40));
+    CHECK(base.loop_end_frame == 120);
+    fs::remove_all(tmp, ec);
+    std::printf("PASS baseline drops baked enhancement\n");
   }
 
   if (g_failures == 0) {

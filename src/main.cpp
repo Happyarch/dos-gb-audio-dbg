@@ -127,6 +127,17 @@ const char* baselineTargetForDeviceTab(int device_tab) {
   return "mt32";
 }
 
+// Enhancement target per device tab: the OPL3 device plays the tier-1
+// foundation only (like the in-game OPL layer from gen_enh_streams.py),
+// while MT-32/GM play every tier and the GB-APU plays none (the bridge
+// rejects "gb", yielding an empty layer).
+const char* enhancementTargetForDeviceTab(int device_tab) {
+  if (device_tab == 0) return "opl3";
+  if (device_tab == 1) return "gb";
+  if (device_tab == 3) return "gm";
+  return "mt32";
+}
+
 // Stage 6.5: loads the selected track's GB baseline into the engine (silent
 // no-op when the repo/midi file is unavailable).
 // Stops the engine, replaces the event stream, sizes total_frames past the
@@ -139,6 +150,7 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
                        audio_dbg::EnhancementManager& enh_mgr,
                        audio_dbg::SongCatalog& catalog, const char* constant,
                        const char* target = "mt32",
+                       const char* enh_target = "mt32",
                        audio_dbg::Mt32Device* mt32 = nullptr) {
   const audio_dbg::SongInfo* info = catalog.findTrack(constant);
   if (info == nullptr) return;
@@ -153,8 +165,11 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
         enh_mgr.loadSongTimbreSysex(info->header_label);
     mt32->applySongTimbres(info->header_label, sx.setup, sx.cleanup);
   }
-  audio_dbg::MidiFileData midi =
-      enh_mgr.parseMidiFile(enh_mgr.midiPathFor(info->header_label, target));
+  // Base channels only (drop_enhancement_tracks): the baked "enh ..."
+  // tracks stay in the file for soundtrack export; the live bridge plays
+  // them per the active device's tier target (OPL3 hears tier 1 only).
+  audio_dbg::MidiFileData midi = enh_mgr.parseMidiFile(
+      enh_mgr.midiPathFor(info->header_label, target), true);
   std::vector<audio_dbg::SimNoteEvent> base = std::move(midi.notes);
   if (base.empty()) {
     // Loud, not silent: the engine keeps the previous target's events, so a
@@ -186,7 +201,7 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   engine.setLoop(0, 0);
   enh_mgr.watchSong(info->header_label);
   std::vector<audio_dbg::SimNoteEvent> enh =
-      enh_mgr.compileEnhancement(info->header_label, target);
+      enh_mgr.compileEnhancement(info->header_label, enh_target);
   engine.setEnhancementEvents(std::move(enh));
 }
 
@@ -619,7 +634,7 @@ int main(int argc, char** argv) {
           engine.setEnhancementEvents({});
         } else {
           std::vector<audio_dbg::SimNoteEvent> compiled =
-              enh_mgr.compileEnhancement(song, baselineTargetForDeviceTab(device_tab));
+              enh_mgr.compileEnhancement(song, enhancementTargetForDeviceTab(device_tab));
           engine.setEnhancementEvents(std::move(compiled));
         }
       }
@@ -829,11 +844,13 @@ int main(int argc, char** argv) {
     if (track_index != last_loaded_track && track_index >= 0 &&
         track_index < static_cast<int>(track_names.size())) {
       mixer.lock();
-      // Baseline target follows the active device tab (gb/gm/mt32).
+      // Baseline target follows the active device tab (gb/gm/mt32); the
+      // enhancement target additionally restricts OPL3 to tier 1.
       const char* target = baselineTargetForDeviceTab(device_tab);
+      const char* enh_target = enhancementTargetForDeviceTab(device_tab);
       loadTrackBaseline(engine, enh_mgr, catalog,
                         track_names[static_cast<std::size_t>(track_index)].c_str(),
-                        target, &mt32_dev);
+                        target, enh_target, &mt32_dev);
       last_loaded_track = track_index;
       mixer.unlock();
     }
@@ -859,12 +876,14 @@ int main(int argc, char** argv) {
             engine.setActiveDevice(devices[i]);
             clock_shim.setInner(devices[i], device_rates[i]);
             mixer.setDevice(&clock_shim, device_rates[i]);
-            // Baseline target follows the active device tab (gb/gm/mt32).
+            // Baseline target follows the active device tab (gb/gm/mt32); the
+            // enhancement target additionally restricts OPL3 to tier 1.
             const char* target = baselineTargetForDeviceTab(device_tab);
+            const char* enh_target = enhancementTargetForDeviceTab(device_tab);
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
                                 track_names[static_cast<std::size_t>(track_index)].c_str(),
-                                target, &mt32_dev);
+                                target, enh_target, &mt32_dev);
             }
             engine.syncDeviceState();
             mixer.unlock();

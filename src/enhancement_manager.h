@@ -279,11 +279,16 @@ class EnhancementManager {
   std::vector<SimNoteEvent> compileEnhancement(
       const std::string& song, const std::string& target = "mt32") const;
   // Native SMF type-0/1 parse: note-ons become on/off pairs with exact
-  // frame timings. Empty on any parse failure.
+  // frame timings. Empty on any parse failure. When
+  // drop_enhancement_tracks is set, tracks named "enh ..." (the baked
+  // enhancement layer gb_to_midi.py merges for soundtrack export) are
+  // skipped: at runtime the live bridge is the single enhancement source.
+  // Replay files always load whole (loadMidiFile keeps false).
   std::vector<SimNoteEvent> loadMidiFile(const std::string& path) const;
   // Same parse, additionally returning the embedded SysEx frames the reader
   // used to skip (retained in encounter order).
-  MidiFileData parseMidiFile(const std::string& path) const;
+  MidiFileData parseMidiFile(const std::string& path,
+                             bool drop_enhancement_tracks = false) const;
   // assets/midi/<target>/<Song>.mid relative to the repo root.
   std::vector<SimNoteEvent> loadSongBaseline(
       const std::string& song, const std::string& target = "mt32") const;

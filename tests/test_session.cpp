@@ -429,17 +429,20 @@ int main() {
     CHECK(ons > 0);
     CHECK(ons == offs);
     CHECK(sorted);
-    // The shipped PalletTown.mid merges the enhancement layer on top of
-    // the GB base (gb_to_midi enhancement_tracks), so it carries both:
-    // GB ch1/2/3 on MIDI 1/2/3 and the compiled enhancement on free
-    // melodic parts 4/5/6 (this track has no drums). A strict base-only
-    // channel check lives on Music_Gym below (no enhancement file).
+    // Baselines carry the GB base only: the baked "enh ..." tracks in the
+    // .mid (gb_to_midi merges them for soundtrack export) are dropped at
+    // load, and runtime enhancement arrives via compileEnhancement (5B
+    // below) under the active device's tier target. PalletTown therefore
+    // sounds GB ch1/2/3 on MIDI 1/2/3 (no drums on this track) and no
+    // enhancement channels. A strict base-only channel check lives on
+    // Music_Gym below (no enhancement file).
     for (int c : chans) {
-      CHECK(c >= 1 && c <= 9);
+      CHECK(c >= 1 && c <= 3);
     }
     CHECK(chans.count(1) == 1);  // Lead voice present.
     CHECK(chans.count(2) == 1);
-    CHECK(chans.count(4) == 1);  // Merged enhancement layer present.
+    CHECK(chans.count(3) == 1);
+    CHECK(chans.count(4) == 0);  // No baked enhancement in baselines.
     std::printf("INFO pallet baseline: %zu events (%zu notes), %u frames\n",
                 base.size(), ons, max_frame);
     // Determinism: a second load is field-identical (exact frame timings).

@@ -93,6 +93,17 @@ std::string deviceMidiTarget(const std::string& canonical) {
   return "mt32";
 }
 
+// Enhancement target per device: the OPL3 device plays the tier-1
+// foundation only (like the in-game OPL layer from gen_enh_streams.py),
+// while MT-32/GM play every tier and the GB-APU plays none (the bridge
+// rejects "gb", yielding an empty layer).
+std::string deviceEnhancementTarget(const std::string& canonical) {
+  if (canonical == "opl3") return "opl3";
+  if (canonical == "gbapu") return "gb";
+  if (canonical == "gm") return "gm";
+  return "mt32";
+}
+
 std::size_t frameSampleCount(std::uint32_t rate, std::uint32_t frame) {
   const std::uint64_t r = rate;
   const std::uint64_t f = frame;
@@ -203,8 +214,8 @@ int runHeadlessTrack(const CliOptions& opt, std::string* err,
   engine.setActiveDevice(dev.get());
   engine.setEvents(base);
   if (!opt.no_enhancement) {
-    std::vector<SimNoteEvent> enh =
-        enh_mgr.compileEnhancement(info->header_label, target);
+    std::vector<SimNoteEvent> enh = enh_mgr.compileEnhancement(
+        info->header_label, deviceEnhancementTarget(canon));
     if (!enh.empty()) engine.setEnhancementEvents(enh);
   } else {
     engine.setEnhancementEnabled(false);

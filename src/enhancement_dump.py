@@ -6,7 +6,7 @@ lints dos_port/tools/audio/enhancements/<Song>.yaml via yaml_lint and prints
 the resolved frame-domain notes, one per line, so C++ never parses YAML.
 
 Usage:
-    enhancement_dump.py <repo_root> <SongLabel> [--target mt32|gm]
+    enhancement_dump.py <repo_root> <SongLabel> [--target mt32|gm|opl3]
 
 Output (stdout, parse-friendly):
     OK <song> <nchannels> <nnotes>
@@ -18,6 +18,9 @@ MIDI channel assignment mirrors gb_to_midi.enhancement_tracks: melodic
 channels take the free parts [4,5,6,7,8] in tier-sorted order (extras
 dropped), rhythm channels go to 9. Programs are 0-based for --target
 (mt32 default; custom timbres fall back to gm like the merge does).
+The opl3 target emits tier-1 channels only: the OPL3 device (like the
+in-game OPL layer built by gen_enh_streams.py) plays the tier-1
+foundation and nothing above it.
 
 Exit status: 0 on success (even with lint warnings, printed to stderr),
 1 when the song has no enhancement or lint reports errors.
@@ -42,7 +45,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("repo_root", type=Path)
     ap.add_argument("song")
-    ap.add_argument("--target", choices=("mt32", "gm"), default="mt32")
+    ap.add_argument("--target", choices=("mt32", "gm", "opl3"), default="mt32")
     args = ap.parse_args()
 
     path = args.repo_root / "dos_port" / "tools" / "audio" / "enhancements" \
@@ -59,6 +62,10 @@ def main() -> int:
         return 1
 
     chans = sorted((c for c in resolved if c.notes), key=lambda c: c.tier)
+    if args.target == "opl3":
+        # Tier-1 foundation only (mirrors gen_enh_streams.py): the OPL3
+        # device never plays tier 2/3, by design.
+        chans = [c for c in chans if c.tier == 1]
     melodic = [c for c in chans if not c.is_rhythm]
     dropped = set(id(c) for c in melodic[len(FREE_MELODIC_CH):])
 

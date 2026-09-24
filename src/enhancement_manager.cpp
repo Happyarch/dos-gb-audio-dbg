@@ -196,7 +196,8 @@ bool extractTempos(SmfReader* r, std::size_t track_end,
 template <typename F>
 bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
                    std::vector<SimNoteEvent>* out, SysExMessages* sysex_out,
-                   std::uint32_t* loop_start_tick, std::uint32_t* loop_end_tick) {
+                   std::uint32_t* loop_start_tick, std::uint32_t* loop_end_tick,
+                   std::string* track_name_out = nullptr) {
   std::uint32_t tick = 0;
   std::uint8_t running = 0;
   std::vector<std::pair<std::uint32_t, int> > pending[16][128];
@@ -231,6 +232,20 @@ bool parseSmfTrack(SmfReader* r, std::size_t track_end, F&& tickToFrame,
                    std::memcmp(text, "loopEnd", 7) == 0) {
           *loop_end_tick = tick;
         }
+      } else if (mtype == 0x03 && track_name_out != nullptr &&
+                 track_name_out->empty()) {
+        // Track-name meta event (gb_to_midi.py writes "GB chN" for base
+        // tracks and "enh <name> tierN" for merged enhancement tracks).
+        // Captured so baseline loaders can drop the baked enhancement
+        // layer; the live bridge is its single source at runtime.
+        std::string name;
+        name.reserve(len < 128 ? len : 128);
+        for (std::uint32_t i = 0; i < len; ++i) {
+          const std::uint8_t c = r->u8();
+          if (!r->ok()) return false;
+          if (name.size() < 128) name.push_back(static_cast<char>(c));
+        }
+        *track_name_out = std::move(name);
       } else {
         r->skip(len);
       }
@@ -651,7 +666,7 @@ std::vector<SimNoteEvent> EnhancementManager::loadMidiFile(
 }
 
 MidiFileData EnhancementManager::parseMidiFile(
-    const std::string& path) const {
+    const std::string& path, bool drop_enhancement_tracks) const {
   MidiFileData result;
   bool ok = false;
   const std::string bytes = readWholeFile(path, &ok);
@@ -724,10 +739,26 @@ MidiFileData EnhancementManager::parseMidiFile(
   std::uint32_t loop_end_tick = kNoTick;
   for (const auto& ti : track_infos) {
     r.seek(ti.start_pos);
-    if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &result.notes,
-                       &result.sysex, &loop_start_tick, &loop_end_tick)) {
+    std::string track_name;
+    std::vector<SimNoteEvent> track_notes;
+    SysExMessages track_sysex;
+    if (!parseSmfTrack(&r, ti.end_pos, tickToFrame, &track_notes,
+                       &track_sysex, &loop_start_tick, &loop_end_tick,
+                       &track_name)) {
       return result;
     }
+    // Baked enhancement tracks ("enh <name> tierN", merged by gb_to_midi.py
+    // for the soundtrack-export side goal) never play at runtime: the live
+    // bridge (compileEnhancement) is the single enhancement source, gated
+    // per device by its tier target. Without this every enhancement note
+    // sounds twice, and tier-2/3 leak onto the OPL3 tab via the mt32 base.
+    if (drop_enhancement_tracks && track_name.compare(0, 4, "enh ") == 0) {
+      continue;
+    }
+    result.notes.insert(result.notes.end(), track_notes.begin(),
+                        track_notes.end());
+    result.sysex.insert(result.sysex.end(), track_sysex.begin(),
+                        track_sysex.end());
   }
   if (loop_start_tick != kNoTick && loop_end_tick != kNoTick) {
     result.loop_end_frame = tickToFrame(loop_end_tick);
@@ -750,7 +781,9 @@ std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
     const std::string& song, const std::string& target) const {
   const std::string path = midiPathFor(song, target);
   if (path.empty()) return {};
-  return loadMidiFile(path);
+  // Base channels only: the baked "enh ..." tracks stay in the file for
+  // soundtrack export; the live bridge plays them per the device's tier.
+  return parseMidiFile(path, true).notes;
 }
 
 SysExMessages EnhancementManager::loadTimbreBank() const {

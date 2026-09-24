@@ -61,9 +61,16 @@ std::unique_ptr<SoundDevice> createHeadlessDevice(
     const std::string& name, std::uint32_t* rateOut, std::string* canonicalOut,
     std::string* err);
 
-// Baseline/enhancement target for a canonical device: "gm" for gm,
-// "mt32" for mt32/opl3/gbapu (assets/midi/ ships mt32 + gm renderings).
+// Baseline target for a canonical device: "gm" for gm, "gb" for gbapu
+// (raw drum ids, no enhancement tracks), "mt32" otherwise
+// (assets/midi/ ships mt32 + gm + gb renderings).
 std::string deviceMidiTarget(const std::string& canonical);
+
+// Enhancement target for a canonical device: "opl3" for opl3 (tier-1
+// foundation only, like the in-game OPL layer), "gb" for gbapu (the
+// bridge rejects it, yielding no enhancement), "gm" for gm, "mt32"
+// otherwise (every tier).
+std::string deviceEnhancementTarget(const std::string& canonical);
 
 // Exact per-frame sample count for a device rate at 60 Hz (stateless).
 std::size_t frameSampleCount(std::uint32_t rate, std::uint32_t frame);
