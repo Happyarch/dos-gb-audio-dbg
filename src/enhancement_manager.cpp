@@ -863,10 +863,12 @@ std::string EnhancementManager::midiPathFor(
 std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
     const std::string& song, const std::string& target) const {
   const std::string path = midiPathFor(song, target);
-  if (path.empty()) return {};
-  // Base channels only: the baked "enh ..." tracks stay in the file for
-  // soundtrack export; the live bridge plays them per the device's tier.
-  return parseMidiFile(path, true).notes;
+  if (!path.empty() && fs::exists(path)) {
+    // Base channels only: the baked "enh ..." tracks stay in the file for
+    // soundtrack export; the live bridge plays them per the device's tier.
+    return parseMidiFile(path, true).notes;
+  }
+  return compileEnhancement(song, target);
 }
 
 bool EnhancementManager::renderBaseline(const std::string& song,

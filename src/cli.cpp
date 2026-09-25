@@ -147,6 +147,8 @@ bool parseCliArgs(const std::vector<std::string>& args, CliOptions* out,
       opt.headless = true;  // Replay is a batch render: no window.
     } else if (a == "--no-enh" || a == "--no-enhancement") {
       opt.no_enhancement = true;
+    } else if (a == "--no-dma" || a == "--no-pcm" || a == "--fm") {
+      opt.no_dma = true;
     } else if (a == "--enhancement" || startsWith(a, "--enhancement=")) {
       std::string v;
       if (!needValue("--enhancement", &v)) return false;
@@ -209,6 +211,7 @@ std::string cliUsage(const char* prog) {
   s += "                       (native device rate, float32). Without --out\n";
   s += "                       the audio is rendered and discarded.\n";
   s += "  --no-enh             disable the enhancement layer (GB baseline only).\n";
+  s += "  --no-dma             disable Sound Blaster DMA PCM for SFX (force FM fallback).\n";
   s += "  --enhancement 0|1    explicit form of the same switch.\n";
   s += "  --replay <log>       replay a captured .audiolog frame-by-frame on\n";
   s += "                       the selected device (implies --headless).\n";

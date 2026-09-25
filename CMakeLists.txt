@@ -404,14 +404,11 @@ target_include_directories(pkmn-audio-dbg-session-tests PRIVATE
 )
 # Absolute repo root so the catalog test finds constants/ + audio/headers/
 # regardless of the CWD ctest runs from.
-set(PKMN_REPO_ROOT_ABS "" CACHE PATH "Path to Pokemon Yellow repository root for test data")
-if(NOT PKMN_REPO_ROOT_ABS)
-  # This project sits at <repo>/dos_port/tools/dos-gb-audio-dbg, so the
-  # Pokemon Yellow repo root (holding constants/ and audio/headers/) is three
-  # levels up. Named `pokeyellow_msdos` probes used to be wrong here: the
-  # submodule is nested inside the parent repo, not beside a sibling copy.
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../../constants")
-    set(PKMN_REPO_ROOT_ABS "${CMAKE_CURRENT_SOURCE_DIR}/../../..")
+get_filename_component(DEFAULT_PKMN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(PKMN_REPO_ROOT_ABS "${DEFAULT_PKMN_ROOT}" CACHE PATH "Path to Pokemon Yellow repository root for test data")
+if(NOT PKMN_REPO_ROOT_ABS OR NOT EXISTS "${PKMN_REPO_ROOT_ABS}/constants")
+  if(EXISTS "${DEFAULT_PKMN_ROOT}/constants")
+    set(PKMN_REPO_ROOT_ABS "${DEFAULT_PKMN_ROOT}" CACHE PATH "Path to Pokemon Yellow repository root for test data" FORCE)
   endif()
 endif()
 target_compile_definitions(pkmn-audio-dbg-session-tests PRIVATE

@@ -138,9 +138,9 @@ int main() {
   // --- MT-32: patch name resolution --------------------------------------
   {
     Mt32Device dev;
-    CHECK(dev.resolveProgramName(0, 0) == "AcouPiano1");
+    CHECK(dev.resolveProgramName(0, 0) == "Acou Piano 1");
     CHECK(dev.resolveProgramName(0, 7) == "Honkytonk");
-    CHECK(dev.resolveProgramName(0, 8) == "Organ 1");
+    CHECK(dev.resolveProgramName(0, 8) == "Elec Org 1");
     for (int p = 0; p < 128; ++p) {
       CHECK(!dev.resolveProgramName(0, p).empty());
     }

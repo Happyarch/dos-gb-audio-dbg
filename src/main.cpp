@@ -183,9 +183,17 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   // Base channels only (drop_enhancement_tracks): the baked "enh ..."
   // tracks stay in the file for soundtrack export; the live bridge plays
   // them per the active device's tier target (OPL3 hears tier 1 only).
-  audio_dbg::MidiFileData midi = enh_mgr.parseMidiFile(
-      enh_mgr.midiPathFor(info->header_label, target), true);
-  std::vector<audio_dbg::SimNoteEvent> base = std::move(midi.notes);
+  const std::string mpath = enh_mgr.midiPathFor(info->header_label, target);
+  audio_dbg::MidiFileData midi;
+  std::vector<audio_dbg::SimNoteEvent> base;
+  bool is_sfx = false;
+  if (!mpath.empty() && std::filesystem::exists(mpath)) {
+    midi = enh_mgr.parseMidiFile(mpath, true);
+    base = std::move(midi.notes);
+  } else {
+    base = enh_mgr.compileEnhancement(info->header_label, enh_target);
+    is_sfx = true;
+  }
   if (base.empty()) {
     // Loud, not silent: the engine keeps the previous target's events, so a
     // missing baseline leaves the wrong program numbers on this device (the
@@ -215,9 +223,13 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   engine.setSongLoop(midi.loop_start_frame, midi.loop_end_frame);
   engine.setLoop(0, 0);
   enh_mgr.watchSong(info->header_label);
-  std::vector<audio_dbg::SimNoteEvent> enh =
-      enh_mgr.compileEnhancement(info->header_label, enh_target);
-  engine.setEnhancementEvents(std::move(enh));
+  if (!is_sfx) {
+    std::vector<audio_dbg::SimNoteEvent> enh =
+        enh_mgr.compileEnhancement(info->header_label, enh_target);
+    engine.setEnhancementEvents(std::move(enh));
+  } else {
+    engine.setEnhancementEvents({});
+  }
   applyOplVoicePatches(engine, enh_mgr);
 }
 
@@ -509,7 +521,7 @@ int main(int argc, char** argv) {
 
   // Backend selection: defaults to MT-32 or respects --device.
   int initial_tab = 2;
-  if (cli_opt.device == "opl3") initial_tab = 0;
+  if (cli_opt.device == "opl3" || cli_opt.no_dma) initial_tab = 0;
   else if (cli_opt.device == "gbapu") initial_tab = 1;
   else if (cli_opt.device == "gm") initial_tab = 3;
 
@@ -600,7 +612,7 @@ int main(int argc, char** argv) {
     return res.first->second;
   };
 
-  bool enhance_gb = true;
+  bool enhance_gb = !cli_opt.no_dma;
   char search_buf[128] = "";
   bool cross_project_search = false;
   bool focus_search_input = false;
@@ -640,6 +652,15 @@ int main(int argc, char** argv) {
             // Manual baseline refresh (top-bar [R] button twin): handled
             // below, just before the stage-6.5 reload check.
             request_baseline_refresh = true;
+          } else if (event.key.keysym.sym == SDLK_g) {
+            enhance_gb = !enhance_gb;
+            if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
+              const std::string& tname = track_names[static_cast<std::size_t>(track_index)];
+              if (tname.rfind("SFX_", 0) == 0 || tname.rfind("sfx_", 0) == 0) {
+                request_tab_switch = enhance_gb ? 1 : 0;
+                last_loaded_track = -1;
+              }
+            }
           } else if (sdlToTransportKey(event.key.keysym.sym, &tkey)) {
             mixer.lock();
             transport.handleKey(engine, &enh_mgr, tkey);
@@ -867,7 +888,21 @@ int main(int argc, char** argv) {
       }
     }
     ImGui::SameLine();
-    ImGui::Checkbox("[G] GB", &enhance_gb);
+    if (ImGui::Checkbox("[G] DMA PCM", &enhance_gb)) {
+      if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
+        const std::string& tname = track_names[static_cast<std::size_t>(track_index)];
+        if (tname.rfind("SFX_", 0) == 0 || tname.rfind("sfx_", 0) == 0) {
+          request_tab_switch = enhance_gb ? 1 : 0;
+          last_loaded_track = -1;
+        }
+      }
+    }
+    if (ImGui::IsItemHovered()) {
+      ImGui::SetTooltip(
+          "Toggle Sound Blaster DMA PCM playback for SFX.\n"
+          "Enabled (Default): Soft APU (SB DMA PCM / GB-APU)\n"
+          "Disabled: FM Fallback (AdLib / OPL3)");
+    }
     ImGui::SameLine();
     // Manual baseline refresh twin of the [R] key: re-renders the current
     // track's .mid files (picks up overrides/*.yaml edits) and reloads.

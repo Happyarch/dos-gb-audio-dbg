@@ -488,17 +488,17 @@ int main() {
     CHECK(!gm_base.empty());
     // Strict GB-base channel check on a track with NO enhancement file:
     // only pulse/wave ch1-3 and noise/drums ch9 may sound.
-    CHECK(!mgr.loadYamlFile("Music_Gym").first);
-    std::vector<SimNoteEvent> gym_base =
-        mgr.loadSongBaseline("Music_Gym", "mt32");
-    CHECK(!gym_base.empty());
+    CHECK(!mgr.loadYamlFile("Music_JigglypuffSong").first);
+    std::vector<SimNoteEvent> jiggly_base =
+        mgr.loadSongBaseline("Music_JigglypuffSong", "mt32");
+    CHECK(!jiggly_base.empty());
     {
-      std::set<int> gym_chans;
-      for (const SimNoteEvent& e : gym_base) gym_chans.insert(e.channel);
-      for (int c : gym_chans) {
+      std::set<int> jiggly_chans;
+      for (const SimNoteEvent& e : jiggly_base) jiggly_chans.insert(e.channel);
+      for (int c : jiggly_chans) {
         CHECK(c == 1 || c == 2 || c == 3 || c == 9);
       }
-      CHECK(!gym_chans.empty());
+      CHECK(!jiggly_chans.empty());
     }
     // Full play-through: every loaded note-on/off reaches the device.
     SessionEngine eng;

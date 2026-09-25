@@ -43,6 +43,8 @@ struct CliOptions {
   std::string replay_path;
   // True = GB baseline only (enhancement overlay off).
   bool no_enhancement = false;
+  // True = disable Sound Blaster DMA PCM for SFX (force FM fallback).
+  bool no_dma = false;
   // Multi-project configuration (config engine). Empty = use config file.
   std::string project;        // --project <name>
   std::string project_dir;    // --project-dir <path>
