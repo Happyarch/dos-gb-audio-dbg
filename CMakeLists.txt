@@ -172,12 +172,14 @@ target_include_directories(gbapu SYSTEM PUBLIC ${GB_APU_DIR})
 target_compile_options(gbapu PRIVATE -w)
 set_target_properties(gbapu PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-# Stage 4.1-4.4: Concrete synthesizer backends.
+# Stage 4.1-4.4/4.6: Concrete synthesizer backends.
 set(PKMN_AUDIO_DBG_SYNTH_SOURCES
   src/devices/opl3_device.cpp
   src/devices/gb_apu_device.cpp
   src/devices/mt32_device.cpp
   src/devices/gm_device.cpp
+  src/devices/imfc_synth_core.cpp
+  src/devices/imfc_device.cpp
 )
 
 # --- Application --------------------------------------------------------------
@@ -194,6 +196,7 @@ set(PKMN_AUDIO_DBG_DEVICE_SOURCES
   src/tabs/psg_tab.cpp
   src/tabs/mt32_tab.cpp
   src/tabs/gm_tab.cpp
+  src/tabs/imfc_tab.cpp
   src/tabs/opl3_tab.cpp
   src/tabs/gb_apu_tab.cpp
   src/tabs/tracker_view.cpp
@@ -275,10 +278,7 @@ target_compile_options(dos-gb-audio-dbg PRIVATE -Wall -Wextra)
 add_executable(pkmn-audio-dbg-tests
   tests/test_intermediate.cpp
   ${PKMN_AUDIO_DBG_DEVICE_SOURCES}
-  src/devices/mt32_device.cpp
-  src/devices/gm_device.cpp
-  src/devices/opl3_device.cpp
-  src/devices/gb_apu_device.cpp
+  ${PKMN_AUDIO_DBG_SYNTH_SOURCES}
 )
 target_include_directories(pkmn-audio-dbg-tests PRIVATE
   src
@@ -376,6 +376,32 @@ target_link_libraries(pkmn-audio-dbg-midi-tests PRIVATE
 target_compile_options(pkmn-audio-dbg-midi-tests PRIVATE -Wall -Wextra)
 
 add_test(NAME midi_backends COMMAND pkmn-audio-dbg-midi-tests)
+
+# --- Stage 4.6: Acceptance test ------------------------------------------------
+# Headless checks for the IMFC (Yamaha FB-01) backend and tab:
+# init/reset, note dispatch, FB-01 SysEx voice loading, ROM presets,
+# master + per-channel rendering, dormant fast escape and mute gating.
+# No GUI, no audio hardware.
+
+add_executable(pkmn-audio-dbg-imfc-tests
+  tests/test_imfc_device.cpp
+  src/devices/midi_device.cpp
+  src/devices/imfc_synth_core.cpp
+  src/devices/imfc_device.cpp
+  src/tabs/midi_tab.cpp
+  src/tabs/imfc_tab.cpp
+)
+target_include_directories(pkmn-audio-dbg-imfc-tests PRIVATE
+  src
+  ${IMGUI_DIR}
+)
+target_link_libraries(pkmn-audio-dbg-imfc-tests PRIVATE
+  imgui
+)
+target_compile_options(pkmn-audio-dbg-imfc-tests PRIVATE -Wall -Wextra)
+
+add_test(NAME imfc_device COMMAND pkmn-audio-dbg-imfc-tests)
+
 
 # --- Stage 5.5 (Part 5A): Acceptance test --------------------------------------
 # Headless checks for the Stage 5.1/5.2 song catalog + session engine: real
@@ -534,6 +560,8 @@ add_executable(pkmn-audio-dbg-cli-tests
   src/devices/gm_device.cpp
   src/devices/opl3_device.cpp
   src/devices/gb_apu_device.cpp
+  src/devices/imfc_synth_core.cpp
+  src/devices/imfc_device.cpp
 )
 target_include_directories(pkmn-audio-dbg-cli-tests PRIVATE
   src

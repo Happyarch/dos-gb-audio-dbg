@@ -873,7 +873,7 @@ std::vector<SimNoteEvent> EnhancementManager::loadSongBaseline(
 
 bool EnhancementManager::renderBaseline(const std::string& song,
                                        std::string* err) const {
-  static const char* const kTargets[2] = {"mt32", "gm"};
+  static const char* const kTargets[3] = {"mt32", "gm", "imfc"};
   if (song.empty() || repo_root_.empty()) {
     if (err != nullptr) *err = "no song (or no repo root)";
     return false;

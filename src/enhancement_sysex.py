@@ -92,12 +92,26 @@ def emit_song(label: str) -> int:
     return 0
 
 
+def emit_imfc_voices() -> int:
+    from gen_imfc_custom_patches import build_imfc_sysex_messages  # noqa: E402
+
+    msgs = build_imfc_sysex_messages()
+    print("TIMBRES")
+    for m in msgs:
+        print(_sysex_line(m))
+    print("END")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("mode", choices=("timbres", "song"))
+    ap.add_argument("mode", choices=("timbres", "song", "imfc-voices"))
     ap.add_argument("label", nargs="?")
+    ap.add_argument("--target", choices=("mt32", "imfc"), default="mt32")
     args = ap.parse_args()
     try:
+        if args.mode == "imfc-voices" or (args.mode == "timbres" and args.target == "imfc"):
+            return emit_imfc_voices()
         if args.mode == "timbres":
             return emit_timbres()
         if not args.label:

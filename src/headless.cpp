@@ -12,6 +12,7 @@
 #include "config.h"
 #include "devices/gb_apu_device.h"
 #include "devices/gm_device.h"
+#include "devices/imfc_device.h"
 #include "devices/midi_device.h"
 #include "devices/mt32_device.h"
 #include "devices/opl3_device.h"
@@ -56,7 +57,7 @@ std::unique_ptr<SoundDevice> createHeadlessDevice(
   const std::string canon = normalizeDeviceName(name);
   if (canon.empty()) {
     if (err != nullptr) {
-      *err = "unknown --device " + name + " (want mt32, gm, opl3, or gbapu)";
+      *err = "unknown --device " + name + " (want mt32, gm, opl3, gbapu, or imfc)";
     }
     return nullptr;
   }
@@ -74,6 +75,10 @@ std::unique_ptr<SoundDevice> createHeadlessDevice(
     auto opl = new Opl3Device();
     rate = opl->sampleRate();
     dev.reset(opl);
+  } else if (canon == "imfc") {
+    auto im = new ImfcDevice();
+    rate = im->sampleRate();
+    dev.reset(im);
   } else {
     auto apu = new GbApuDevice();
     rate = static_cast<std::uint32_t>(apu->sampleRate());
@@ -86,6 +91,7 @@ std::unique_ptr<SoundDevice> createHeadlessDevice(
 
 std::string deviceMidiTarget(const std::string& canonical) {
   if (canonical == "gm") return "gm";
+  if (canonical == "imfc") return "imfc";
   // The GB-APU loads the gb baseline: raw pret drum instrument ids on MIDI
   // channel 9 and no enhancement tracks (mirrors audition's live gb_events,
   // which never pass through drum_key or overrides).
@@ -101,6 +107,7 @@ std::string deviceEnhancementTarget(const std::string& canonical) {
   if (canonical == "opl3") return "opl3";
   if (canonical == "gbapu") return "gb";
   if (canonical == "gm") return "gm";
+  if (canonical == "imfc") return "imfc";
   return "mt32";
 }
 

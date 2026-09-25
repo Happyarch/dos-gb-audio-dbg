@@ -60,6 +60,7 @@ std::string normalizeDeviceName(const std::string& name) {
   }
   if (q == "opl3") return "opl3";
   if (q == "gbapu" || q == "gbpu" || q == "apu" || q == "gb") return "gbapu";
+  if (q == "imfc" || q == "fb01" || q == "fb-01" || q == "ym2151" || q == "ym2164") return "imfc";
   return "";
 }
 
@@ -203,7 +204,7 @@ std::string cliUsage(const char* prog) {
   s += "                       ImGui. Required with --track.\n";
   s += "  --track <ID>         track constant or fuzzy name (MUSIC_PALLET_TOWN,\n";
   s += "                       PalletTown, routes1). Resolved via SongCatalog.\n";
-  s += "  --device <NAME>      backend: mt32, gm, opl3, gbapu (default mt32).\n";
+  s += "  --device <NAME>      backend: mt32, gm, opl3, gbapu, imfc (default mt32).\n";
   s += "  --frames <N>         60 Hz frames to render. Default: the track\n";
   s += "                       length (or the log length for --replay), else\n";
   s += "                       3600 frames (60 s).\n";

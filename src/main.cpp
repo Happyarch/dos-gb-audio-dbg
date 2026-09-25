@@ -40,6 +40,7 @@
 // Stage 4: concrete synthesizer backends.
 #include "devices/gb_apu_device.h"
 #include "devices/gm_device.h"
+#include "devices/imfc_device.h"
 #include "devices/mt32_device.h"
 #include "devices/opl3_device.h"
 // Stage 5: session engine, song catalog, enhancement watcher.
@@ -56,6 +57,7 @@
 // Stage 7: concrete device tabs + Schism-style tracker view.
 #include "tabs/gb_apu_tab.h"
 #include "tabs/gm_tab.h"
+#include "tabs/imfc_tab.h"
 #include "tabs/mt32_tab.h"
 #include "tabs/opl3_tab.h"
 #include "tabs/tracker_view.h"
@@ -69,7 +71,8 @@ constexpr int kWindowHeight = 720;
 constexpr Uint32 kFrameBudgetMs = 16;
 
 constexpr const char* kDeviceTabs[] = {"OPL3", "GB-APU", "MT-32",
-                                       "General MIDI"};
+                                       "General MIDI", "IMFC"};
+constexpr int kNumDeviceTabs = 5;
 
 // Stage 7.7: builds the driver-simulation view for the tracker from the
 // engine's dispatched stream: note-ons stamped at the current frame become
@@ -122,6 +125,7 @@ audio_dbg::SimState buildSimState(const audio_dbg::SessionEngine& engine) {
 // channel — e.g. MT-32 90/88 ("Trombone 1"/"Trumpet 1") on the GM device
 // read as "Pad 3 (polysynth)"/"Pad 1 (new age)".
 const char* baselineTargetForDeviceTab(int device_tab) {
+  if (device_tab == 4) return "imfc";
   if (device_tab == 3) return "gm";
   if (device_tab == 1) return "gb";
   return "mt32";
@@ -129,12 +133,13 @@ const char* baselineTargetForDeviceTab(int device_tab) {
 
 // Enhancement target per device tab: the OPL3 device plays the tier-1
 // foundation only (like the in-game OPL layer from gen_enh_streams.py),
-// while MT-32/GM play every tier and the GB-APU plays none (the bridge
+// while MT-32/GM/IMFC play their targets and the GB-APU plays none (the bridge
 // rejects "gb", yielding an empty layer).
 const char* enhancementTargetForDeviceTab(int device_tab) {
   if (device_tab == 0) return "opl3";
   if (device_tab == 1) return "gb";
   if (device_tab == 3) return "gm";
+  if (device_tab == 4) return "imfc";
   return "mt32";
 }
 
@@ -166,7 +171,8 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
                        audio_dbg::SongCatalog& catalog, const char* constant,
                        const char* target = "mt32",
                        const char* enh_target = "mt32",
-                       audio_dbg::Mt32Device* mt32 = nullptr) {
+                       audio_dbg::Mt32Device* mt32 = nullptr,
+                       audio_dbg::ImfcDevice* imfc = nullptr) {
   const audio_dbg::SongInfo* info = catalog.findTrack(constant);
   if (info == nullptr) return;
   // Custom timbres are stateful across track loads: send the PREVIOUS track's
@@ -208,6 +214,11 @@ void loadTrackBaseline(audio_dbg::SessionEngine& engine,
   // latch Patch Memory.
   if (mt32 != nullptr && !midi.sysex.empty()) {
     mt32->sendSysExMessages(midi.sysex);
+  }
+  if (imfc != nullptr && !midi.sysex.empty()) {
+    for (const auto& sx : midi.sysex) {
+      imfc->dispatchSysEx(sx.data(), sx.size());
+    }
   }
   std::uint32_t max_frame = 0;
   for (const audio_dbg::SimNoteEvent& e : base) {
@@ -484,30 +495,36 @@ int main(int argc, char** argv) {
   audio_dbg::GbApuDevice gbapu_dev;
   audio_dbg::Mt32Device mt32_dev;
   audio_dbg::GmDevice gm_dev;
+  audio_dbg::ImfcDevice imfc_dev;
   opl3_dev.init();
   gbapu_dev.init();
   mt32_dev.init();
   gm_dev.init();
+  imfc_dev.init();
 
   audio_dbg::Opl3Tab opl3_tab;
   audio_dbg::GbApuTab gbapu_tab;
   audio_dbg::Mt32Tab mt32_tab;
   audio_dbg::GmTab gm_tab;
+  audio_dbg::ImfcTab imfc_tab;
   opl3_tab.setOpl3Device(&opl3_dev);
   gbapu_tab.setGbApuDevice(&gbapu_dev);
   mt32_tab.setMt32Device(&mt32_dev);
   gm_tab.setGmDevice(&gm_dev);
+  imfc_tab.setImfcDevice(&imfc_dev);
 
   audio_dbg::TrackerView tracker;
 
-  audio_dbg::SoundDevice* devices[4] = {&opl3_dev, &gbapu_dev, &mt32_dev,
-                                        &gm_dev};
-  audio_dbg::DeviceTab* tabs[4] = {&opl3_tab, &gbapu_tab, &mt32_tab, &gm_tab};
-  const int device_rates[4] = {
+  audio_dbg::SoundDevice* devices[5] = {&opl3_dev, &gbapu_dev, &mt32_dev,
+                                        &gm_dev, &imfc_dev};
+  audio_dbg::DeviceTab* tabs[5] = {&opl3_tab, &gbapu_tab, &mt32_tab, &gm_tab,
+                                   &imfc_tab};
+  const int device_rates[5] = {
       static_cast<int>(opl3_dev.sampleRate()),
       static_cast<int>(gbapu_dev.sampleRate()),
       static_cast<int>(mt32_dev.sampleRate()),
       static_cast<int>(gm_dev.sampleRate()),
+      static_cast<int>(imfc_dev.sampleRate()),
   };
 
   audio_dbg::AudioMixer mixer;
@@ -524,6 +541,7 @@ int main(int argc, char** argv) {
   if (cli_opt.device == "opl3" || cli_opt.no_dma) initial_tab = 0;
   else if (cli_opt.device == "gbapu") initial_tab = 1;
   else if (cli_opt.device == "gm") initial_tab = 3;
+  else if (cli_opt.device == "imfc") initial_tab = 4;
 
   int device_tab = initial_tab;
   int request_tab_switch = initial_tab;
@@ -640,10 +658,10 @@ int main(int argc, char** argv) {
         } else if (!(event.key.keysym.mod & (KMOD_CTRL | KMOD_ALT | KMOD_GUI)) &&
                    event.key.keysym.sym == SDLK_SLASH && !io.WantTextInput) {
           focus_search_input = true;
-        } else if (event.key.keysym.sym >= SDLK_F1 && event.key.keysym.sym <= SDLK_F4) {
+        } else if (event.key.keysym.sym >= SDLK_F1 && event.key.keysym.sym <= SDLK_F5) {
           request_tab_switch = event.key.keysym.sym - SDLK_F1;
         } else if ((event.key.keysym.mod & KMOD_ALT) &&
-                   event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_4) {
+                   event.key.keysym.sym >= SDLK_1 && event.key.keysym.sym <= SDLK_5) {
           request_tab_switch = event.key.keysym.sym - SDLK_1;
         } else if (!io.WantTextInput) {
           // Stage 6.4: transport shortcuts handled only when text input is not active
@@ -963,7 +981,7 @@ int main(int argc, char** argv) {
       const char* enh_target = enhancementTargetForDeviceTab(device_tab);
       loadTrackBaseline(engine, enh_mgr, catalog,
                         track_names[static_cast<std::size_t>(track_index)].c_str(),
-                        target, enh_target, &mt32_dev);
+                        target, enh_target, &mt32_dev, &imfc_dev);
       last_loaded_track = track_index;
       mixer.unlock();
     }
@@ -977,7 +995,7 @@ int main(int argc, char** argv) {
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                      ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
     if (ImGui::BeginTabBar("DeviceTabBar")) {
-      for (int i = 0; i < 4; ++i) {
+      for (int i = 0; i < kNumDeviceTabs; ++i) {
         ImGuiTabItemFlags flags = 0;
         if (request_tab_switch == i) {
           flags |= ImGuiTabItemFlags_SetSelected;
@@ -989,14 +1007,14 @@ int main(int argc, char** argv) {
             engine.setActiveDevice(devices[i]);
             clock_shim.setInner(devices[i], device_rates[i]);
             mixer.setDevice(&clock_shim, device_rates[i]);
-            // Baseline target follows the active device tab (gb/gm/mt32); the
+            // Baseline target follows the active device tab (gb/gm/mt32/imfc); the
             // enhancement target additionally restricts OPL3 to tier 1.
             const char* target = baselineTargetForDeviceTab(device_tab);
             const char* enh_target = enhancementTargetForDeviceTab(device_tab);
             if (track_index >= 0 && track_index < static_cast<int>(track_names.size())) {
               loadTrackBaseline(engine, enh_mgr, catalog,
                                 track_names[static_cast<std::size_t>(track_index)].c_str(),
-                                target, enh_target, &mt32_dev);
+                                target, enh_target, &mt32_dev, &imfc_dev);
             }
             engine.syncDeviceState();
             mixer.unlock();

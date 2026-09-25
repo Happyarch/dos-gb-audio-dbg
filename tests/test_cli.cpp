@@ -202,17 +202,24 @@ int main() {
     CHECK(normalizeDeviceName("gbapu") == "gbapu");
     CHECK(normalizeDeviceName("GB-APU") == "gbapu");
     CHECK(normalizeDeviceName("gb_apu") == "gbapu");
+    CHECK(normalizeDeviceName("imfc") == "imfc");
+    CHECK(normalizeDeviceName("IMFC") == "imfc");
+    CHECK(normalizeDeviceName("fb01") == "imfc");
+    CHECK(normalizeDeviceName("FB-01") == "imfc");
     CHECK(normalizeDeviceName("scummvm").empty());
     CHECK(isKnownDevice("mt32") && isKnownDevice("gm") &&
-          isKnownDevice("opl3") && isKnownDevice("gbapu"));
-    CHECK(!isKnownDevice("fb01"));
+          isKnownDevice("opl3") && isKnownDevice("gbapu") &&
+          isKnownDevice("imfc") && isKnownDevice("fb01"));
+    CHECK(!isKnownDevice("c64_sid"));
     CHECK(deviceMidiTarget("mt32") == "mt32");
     CHECK(deviceMidiTarget("gm") == "gm");
     CHECK(deviceMidiTarget("opl3") == "mt32");
+    CHECK(deviceMidiTarget("imfc") == "imfc");
     CHECK(deviceEnhancementTarget("opl3") == "opl3");
     CHECK(deviceEnhancementTarget("gbapu") == "gb");
     CHECK(deviceEnhancementTarget("gm") == "gm");
     CHECK(deviceEnhancementTarget("mt32") == "mt32");
+    CHECK(deviceEnhancementTarget("imfc") == "imfc");
     CHECK(deviceMidiTarget("gbapu") == "gb");
     std::uint32_t rate = 0;
     std::string canon, err;
@@ -221,6 +228,8 @@ int main() {
     // the 1:1 passthrough path; Blip_Buffer's clock_rate is fixed at 4194304,
     // so pitch is unchanged.
     CHECK(dev != nullptr && canon == "gbapu" && rate == 48000u);
+    auto imfc_dev = createHeadlessDevice("imfc", &rate, &canon, &err);
+    CHECK(imfc_dev != nullptr && canon == "imfc" && rate == 55930u);
     CHECK(createHeadlessDevice("nope", &rate, &canon, &err) == nullptr);
     std::printf("PASS device normalization\n");
   }
