@@ -125,3 +125,15 @@ track re-render null difference, record/replay parity null difference).
   (deterministic WAV) or `--replay` for captured streams.
 - `revisions.py` snapshots -> built-in revision manager (`[`, `]`, slot
   comparison), same `{id:04d}_{timestamp}_{note}.yaml` layout.
+
+## License
+
+GNU General Public License v2.0 or later (GPL-2.0-or-later) — see [LICENSE](LICENSE).
+
+Individual synthesis backends adapt or link upstream cores:
+- NukedOPL3 (`Opl3Device`): LGPL-2.1+ (Nuke.YKT, Tony Gies)
+- Gb_Snd_Emu (`GbApuDevice`): LGPL-2.1 (Shay Green)
+- Munt / libmt32emu (`Mt32Device`): LGPL-2.1+
+- FluidSynth / libfluidsynth (`GmDevice`): LGPL-2.1+
+- IMFC / YM2151 (`ImfcDevice`): GPL-2.0-or-later (adapted from DOSBox-X, Loris Chiocca, Daisuke Nagano, Jarek Burczynski)
+
